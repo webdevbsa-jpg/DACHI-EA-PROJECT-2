@@ -1023,6 +1023,12 @@ input int    InpSMA_Slow        = 20;
 input ENUM_MA_METHOD InpSlowMA_Method = MODE_LWMA;  // Slow MA method: SMA/EMA/SMMA/LWMA (v13.9.2: LWMA20 baseline)
 input int    InpATR_Period      = 14;
 
+input group "=== Clean Core HTF Context (H1 Bias + M15 Setup) ==="
+input bool   InpUseH1Bias         = true;
+input bool   InpAllowNeutralBias  = false;
+input bool   InpUseM15Setup       = true;
+input bool   InpAllowM15Neutral   = false;
+
 input group "=== F0: EMA Gap Filter ==="
 input ENUM_FILTER_ACTION InpGap_Action  = F_SOFT;
 input int    InpGapPoints       = 100;       // min gap bar-0 look-ahead (points)
@@ -3084,6 +3090,40 @@ void ProcessF3Recovery(bool new_bar){
     g_f3_armed=false;g_f3_dir=0;g_f3_counter=0;g_f3_reason="FIRED";
 }
 
+int GetHTFDirection(ENUM_TIMEFRAMES tf, int idx){
+    double c = iClose(_Symbol, tf, idx);
+    int h20 = iMA(_Symbol, tf, 20, 0, MODE_EMA, PRICE_CLOSE);
+    int h50 = iMA(_Symbol, tf, 50, 0, MODE_EMA, PRICE_CLOSE);
+    if(c==0 || h20==INVALID_HANDLE || h50==INVALID_HANDLE) return 0;
+
+    double b20[1], b50[1], b50_prev[1];
+    if(CopyBuffer(h20, 0, idx,   1, b20)      <= 0) return 0;
+    if(CopyBuffer(h50, 0, idx,   1, b50)      <= 0) return 0;
+    if(CopyBuffer(h50, 0, idx+3, 1, b50_prev) <= 0) return 0;
+
+    double e20 = b20[0];
+    double e50 = b50[0];
+    double slope = e50 - b50_prev[0];
+
+    if(c>e50 && e20>e50 && slope>=0) return 1;
+    if(c<e50 && e20<e50 && slope<=0) return -1;
+    return 0;
+}
+
+bool HTFContextBlocks(int sig, int idx){
+    if(InpUseH1Bias){
+        int h1 = GetHTFDirection(PERIOD_H1, idx);
+        if(h1==0 && !InpAllowNeutralBias) return true;
+        if(h1!=0 && sig!=h1) return true;
+    }
+    if(InpUseM15Setup){
+        int m15 = GetHTFDirection(PERIOD_M15, idx);
+        if(m15==0 && !InpAllowM15Neutral) return true;
+        if(m15!=0 && sig!=m15) return true;
+    }
+    return false;
+}
+
 // === PIPELINE (v13.10.0 simplified — no scoring, no judge) ===
 // Returns true if signal should proceed (not blocked).
 // v13.11.7 behavior: each filter keeps ON/OFF runtime, with class-based effect: SOFT=>LIMITED, HARD=>BLOCKED when ON and triggered.
@@ -3096,61 +3136,16 @@ bool EvaluatePipeline(int sig){
     g_f4_trig=false;g_f5_trig=false;
     g_regime_lot_scale=1.0;
 
-    bool h_f0=false, h_f1=false, h_f2=false, h_f4=false, h_f5=false;
-    bool s_f0=false, s_f1=false, s_f2=false, s_f4=false, s_f5=false;
-
-    // F0 EMA gap
-    if(InpGap_Action!=F_OFF){
-        g_f0_trig=EvalF0();
-        if(g_f0_trig){
-            if(InpGap_Action==F_HARD) h_f0=true;
-            if(InpGap_Action==F_SOFT) s_f0=true;
-        }
-    }
-    // F1 DI±
-    if(InpF1_Action!=F_OFF){
-        g_f1_trig=EvalF1(sig);
-        if(g_f1_trig){
-            if(InpF1_Action==F_HARD) h_f1=true;
-            if(InpF1_Action==F_SOFT) s_f1=true;
-        }
-    }
-    // F2 Crossing distance
+    bool h_f2=false;
     if(InpF2_Action!=F_OFF){
         g_f2_trig=EvalF2();
-        if(g_f2_trig){
-            if(InpF2_Action==F_HARD) h_f2=true;
-            if(InpF2_Action==F_SOFT) s_f2=true;
-        }
-    }
-    // F4 Slow MA direction
-    if(InpF4_Action!=F_OFF){
-        g_f4_trig=EvalF4(sig);
-        if(g_f4_trig){
-            if(InpF4_Action==F_HARD) h_f4=true;
-            if(InpF4_Action==F_SOFT) s_f4=true;
-        }
-    }
-    // F5 RVI OB/OS
-    if(InpF5_Action!=F_OFF){
-        g_f5_trig=EvalF5(sig);
-        if(g_f5_trig){
-            if(InpF5_Action==F_HARD) h_f5=true;
-            if(InpF5_Action==F_SOFT) s_f5=true;
-        }
+        if(g_f2_trig) h_f2=true;
     }
 
-    // Intelligent Filter (HARD-only gate)
-    bool h_if = false;
-    if(InpIF_Enable) h_if = EvalIntelligentFilter(sig, 1);
-
-    // Market Regime gate (v13.10.0). Returns true to block; may set lot scale.
-    bool h_regime = false;
-    if(InpRegime_Enable) h_regime = MarketRegimeBlocks(sig);
-
-    g_pipe_filter_hard = h_f0||h_f1||h_f2||h_f4||h_f5||h_if;
-    g_pipe_soft = s_f0||s_f1||s_f2||s_f4||s_f5;
-    g_pipe_hard = g_pipe_filter_hard || h_regime;
+    bool h_htf = HTFContextBlocks(sig, 1);
+    g_pipe_filter_hard = h_f2 || h_htf;
+    g_pipe_soft = false;
+    g_pipe_hard = g_pipe_filter_hard;
     return !g_pipe_hard;
 }
 
@@ -3158,58 +3153,8 @@ bool EvaluatePipeline(int sig){
 // v13.10.0 simplified — no scoring/judge; each F_HARD filter independently blocks.
 bool EvaluatePipelineAt(int idx, int sig, bool &out_hard, bool &out_soft){
     out_hard=false; out_soft=false;
-
-    bool t_f0=false, t_f1=false, t_f2=false, t_f4=false, t_f5=false;
-
-    // F0 EMA Gap — measure at the SIGNAL bar (idx).
-    if(InpGap_Action!=F_OFF){
-        double ef0[1],es0[1];
-        if(CopyBuffer(h_ema_fast,0,idx,1,ef0)>0&&CopyBuffer(h_sma_slow,0,idx,1,es0)>0){
-            double gap_pts_h=MathAbs(ef0[0]-es0[0])/_Point;
-            double threshold_h;
-            if(InpGap_UseATRPct && g_atr_val>0)
-                threshold_h=(g_atr_val/_Point)*InpGap_ATRPct/100.0;
-            else
-                threshold_h=(double)InpGapPoints;
-            t_f0=(gap_pts_h<threshold_h);
-        }
-    }
-    // F1 DI± historical
-    if(InpF1_Action!=F_OFF&&h_adx!=INVALID_HANDLE){
-        double dp[1],dm[1];
-        if(CopyBuffer(h_adx,1,idx,1,dp)>0&&CopyBuffer(h_adx,2,idx,1,dm)>0){
-            t_f1=(sig==1)?(dm[0]>dp[0]+InpF1_Margin):(dp[0]>dm[0]+InpF1_Margin);
-        }
-    }
-    // F2 cross-distance historical
-    if(InpF2_Action!=F_OFF) t_f2=EvalF2At(idx);
-    // F4 slow-MA direction historical
-    if(InpF4_Action!=F_OFF && h_sma_slow!=INVALID_HANDLE){
-        int look = MathMax(1, InpF4_LookbackBars);
-        double sn[1], sb[1];
-        if(CopyBuffer(h_sma_slow,0,idx,1,sn)>0 && CopyBuffer(h_sma_slow,0,idx+look,1,sb)>0){
-            double slope_pts = (sn[0]-sb[0])/_Point/(double)look;
-            double min_slope = MathMax(0.0, InpF4_MinSlopePts);
-            if(sig== 1) t_f4=(slope_pts <  +min_slope);
-            if(sig==-1) t_f4=(slope_pts >  -min_slope);
-        }
-    }
-    // F5 RVI OB/OS historical
-    if(InpF5_Action!=F_OFF) t_f5 = EvalF5At(sig, idx);
-
-    // Intelligent Filter historical mirror
-    bool t_if = false;
-    if(InpIF_Enable) t_if = EvalIntelligentFilter(sig, idx);
-
-    // Aggregate (ON/OFF runtime): ON+triggered => LIMITED for SOFT class, BLOCKED for HARD class.
-    if(t_f0){ if(InpGap_Action==F_HARD) out_hard=true; else if(InpGap_Action==F_SOFT) out_soft=true; }
-    if(t_f1){ if(InpF1_Action==F_HARD) out_hard=true; else if(InpF1_Action==F_SOFT) out_soft=true; }
-    if(t_f2){ if(InpF2_Action==F_HARD) out_hard=true; else if(InpF2_Action==F_SOFT) out_soft=true; }
-    if(t_f4){ if(InpF4_Action==F_HARD) out_hard=true; else if(InpF4_Action==F_SOFT) out_soft=true; }
-    if(t_f5){ if(InpF5_Action==F_HARD) out_hard=true; else if(InpF5_Action==F_SOFT) out_soft=true; }
-    if(t_if) out_hard=true;
-    // Note: regime gate is live-only (uses live ATR/EMA state). Historical scan
-    // does not re-evaluate regime — the chart label reflects filter-stack outcome.
+    if(InpF2_Action!=F_OFF && EvalF2At(idx)) out_hard=true;
+    if(HTFContextBlocks(sig, idx)) out_hard=true;
     return !out_hard;
 }
 
@@ -4305,16 +4250,9 @@ void ScanHistory(){
         // v13.11.0 — combine filter class with regime class (harshest wins).
         // ComputeRegimeAt(i, ...) evaluates regime at the historical bar so
         // the label history matches what would have been live at that bar.
-        ENUM_SIGNAL_CLASS filter_cls = hard ? SC_BLOCKED : (soft ? SC_SOFT : SC_VALID);
-        ENUM_SIGNAL_CLASS regime_cls = SC_VALID;
-        if(InpRegime_Enable){
-            RegimeState rs;
-            ComputeRegimeAt(i, rs);
-            regime_cls = RegimeLabelClass(rs.regime);
-        }
-        ENUM_SIGNAL_CLASS sc_class = CombineSignalClass(filter_cls, regime_cls);
+        ENUM_SIGNAL_CLASS filter_cls = hard ? SC_BLOCKED : SC_VALID;
+        ENUM_SIGNAL_CLASS sc_class = filter_cls;
         if(sc_class==SC_BLOCKED) sc_blocked++;
-        else if(sc_class==SC_SOFT) sc_soft++;
 
         DrawSignalLabel(sig,st,sp,sc_class);
         ColorSignalCandle(sig,st);
@@ -4340,7 +4278,7 @@ void ScanHistory(){
         // (RANGING/LONG_RANGING/EARLY_BR labels) keeps normal TP/SL per user
         // spec: "perlakuan tetap regime rules" — regime affects the label,
         // not the TP/SL multiplier.
-        last_tight=(filter_cls==SC_SOFT);
+        last_tight=false;
 
         // ScanHistory must never arm runtime trading state. It only prepares
         // optional visual TP/SL levels for the last non-blocked historical
@@ -4733,11 +4671,7 @@ void OnTick(){
                 // Entry/exit branches still use g_pipe_hard/g_pipe_soft (filter
                 // pipeline including regime block), so behavior is unchanged
                 // when regime is OFF or when regime status matches filter.
-                ENUM_SIGNAL_CLASS filter_cls = g_pipe_filter_hard ? SC_BLOCKED : SC_VALID;
-                ENUM_SIGNAL_CLASS regime_cls = InpRegime_Enable
-                                              ? RegimeLabelClass(g_regime) : SC_VALID;
-                ENUM_SIGNAL_CLASS live_label = CombineSignalClass(filter_cls, regime_cls);
-                if(g_pipe_hard) live_label = SC_BLOCKED;
+                ENUM_SIGNAL_CLASS live_label = g_pipe_hard ? SC_BLOCKED : SC_VALID;
 
                 if(pipe_ok&&!g_pipe_hard){
                     // VALID per filter pipeline. Label may be SOFT if regime is
