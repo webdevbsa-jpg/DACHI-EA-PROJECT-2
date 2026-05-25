@@ -3092,11 +3092,19 @@ void ProcessF3Recovery(bool new_bar){
 
 int GetHTFDirection(ENUM_TIMEFRAMES tf, int idx){
     double c = iClose(_Symbol, tf, idx);
-    double e20 = iMA(_Symbol, tf, 20, 0, MODE_EMA, PRICE_CLOSE, idx);
-    double e50 = iMA(_Symbol, tf, 50, 0, MODE_EMA, PRICE_CLOSE, idx);
-    double e50_prev = iMA(_Symbol, tf, 50, 0, MODE_EMA, PRICE_CLOSE, idx+3);
-    if(c==0 || e20==0 || e50==0 || e50_prev==0) return 0;
-    double slope = e50 - e50_prev;
+    int h20 = iMA(_Symbol, tf, 20, 0, MODE_EMA, PRICE_CLOSE);
+    int h50 = iMA(_Symbol, tf, 50, 0, MODE_EMA, PRICE_CLOSE);
+    if(c==0 || h20==INVALID_HANDLE || h50==INVALID_HANDLE) return 0;
+
+    double b20[1], b50[1], b50_prev[1];
+    if(CopyBuffer(h20, 0, idx,   1, b20)      <= 0) return 0;
+    if(CopyBuffer(h50, 0, idx,   1, b50)      <= 0) return 0;
+    if(CopyBuffer(h50, 0, idx+3, 1, b50_prev) <= 0) return 0;
+
+    double e20 = b20[0];
+    double e50 = b50[0];
+    double slope = e50 - b50_prev[0];
+
     if(c>e50 && e20>e50 && slope>=0) return 1;
     if(c<e50 && e20<e50 && slope<=0) return -1;
     return 0;
