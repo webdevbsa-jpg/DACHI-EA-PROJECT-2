@@ -1,977 +1,10 @@
-// =============================================================================
-// Dachi_Trader_v13_11_8.mq5 — Expert Advisor
-// Version: 13.11.8
-//
-// Versioning rule (X.Y.Z): every edit bumps a segment AND renames the file.
-//   X = major architectural change (e.g. v12 → v13).
-//   Y = new feature or feature rebuild.
-//   Z = bug fix / small revision.
-// Filename, header comment, and #property version all carry the full X.Y.Z.
-// From v13.9.10 onward the #property version uses the three-part "X.Y.Z"
-// form so Z can be two digits; lint_mq5.py accepts both notations.
-// Renaming detaches MT5 chart attachments — re-attach after each load.
-//
-// CHANGELOG v13.11.2 (fallback slope guard — fix BLOCKED-in-trend bug):
-//   [FIX]      Pullback bars inside a strong trend were being demoted to
-//              RANGING WEAK_ER (BLOCKED) by the pure-ER fallback in v13.11.1.
-//              Cause: CONFIRMED_TREND requires ER ≥ 0.35 AND ADX ≥ 22 AND
-//              MA-gap ≥ 0.50×ATR simultaneously — a brief pullback within
-//              a strong uptrend drops local ER below 0.35 momentarily, so
-//              the bar falls through to the fallback bucket and gets
-//              WEAK_ER → BLOCKED. User report: chart panel showed
-//              "Regime TREND ER=0.61 TREND_UP" (current) but all
-//              historical crossings labeled "! BLOCKED BUY/SELL" magenta.
-//   [LOGIC]    Added EMA50 slope guard to the WEAK_ER fallback path. When
-//              ER ∈ [InpRegime_ER_ChoppyMax, InpRegime_ER_DirectionalMin)
-//              AND |EMA50(shift) - EMA50(shift+N)| ≥ M × ATR14, upgrade
-//              regime to REG_DIRECTIONAL with reason "DIR_BY_SLOPE" (block=
-//              false) instead of REG_RANGING WEAK_ER. Pure sideways
-//              markets (EMA50 flat) still hit WEAK_ER and block.
-//   [INPUTS]   New: InpRegime_FallbackSlopeBars=10 (lookback for EMA50
-//              slope), InpRegime_FallbackSlopeATRMult=0.30 (delta vs ATR
-//              threshold). 0.30×ATR over 10 bars catches even modest
-//              trend slopes while excluding flat ranging.
-//   [HASH]     Logic-version marker (uint)0x13C00010 → (uint)0x13C00080.
-//              .set files from v13.11.1 trigger rescan because some bars
-//              that labeled BLOCKED in v13.11.1 will relabel VALID in
-//              v13.11.2 (pullback inside trend = DIR_BY_SLOPE).
-//
-// CHANGELOG v13.11.1 (regime entry policy tightened per user feedback):
-//   [BEHAVIOR] RANGING and LONG_RANGING now always block entry — the
-//              NEAR_HI/NEAR_LO breakout-edge exceptions and the
-//              LONG_RANGE BREAKOUT_UP/DN allow paths are removed.
-//              User spec: "saya tidak ingin ikut pada market seperti
-//              itu" (don't trade ranging/long-ranging at all). The
-//              reason strings (MID_RANGE, NEAR_HI, BREAKOUT_UP, ...)
-//              are preserved for diagnostic purposes but block=true
-//              regardless. The weak-ER fallback bucket (ER in [0.20,
-//              0.35) without structural confirm) also flips to
-//              block=true.
-//   [LABEL]    RegimeLabelClass mapping changed:
-//                CHOPPY/RANGING/LONG_RANGING       -> SC_BLOCKED
-//                EARLY_BREAKOUT                    -> SC_SOFT (LIMITED)
-//                DIRECTIONAL/STRONG_DIR/CONFIRMED  -> SC_VALID
-//              Chart shows magenta BLOCKED for RANGING/LONG_RANGING
-//              instead of v13.11.0's yellow LIMITED. EARLY_BREAKOUT
-//              keeps the yellow LIMITED label as a caution indicator
-//              while still entering aligned-direction signals.
-//   [LOT]      CalcLot() now applies g_regime_lot_scale when
-//              InpRegime_Enable, so EARLY_BREAKOUT's 0.5x lot rule
-//              (InpRegime_EarlyBreakoutLotMult) actually takes effect
-//              at order open. Was a dormant feature in v13.10.0/v13.11.0
-//              — the global was set but never read by lot calc.
-//   [HASH]     Logic-version marker bumped (uint)0x13C00000 ->
-//              (uint)0x13C00010. .set files from v13.11.0 trigger a
-//              clean rescan because deterministic block/no-block
-//              outcomes shifted for the ranging/long-ranging family.
-//
-// CHANGELOG v13.11.0 (regime tier system + signal-class integration):
-//   [NEW]   Two new regime classes derived from pure-ER fallback when
-//           structural detectors don't fire:
-//             - REG_DIRECTIONAL (ER ∈ [0.35, 0.55))
-//             - REG_STRONG_DIRECTIONAL (ER ≥ 0.55)
-//           Plus low-ER fallback now classifies as CHOPPY (ER < 0.20)
-//           or RANGING (ER ∈ [0.20, 0.35)) instead of NO_CLASS. The
-//           NO_CLASS limbo state is eliminated — every bar gets a
-//           regime label.
-//   [NEW]   Regime now maps to ENUM_SIGNAL_CLASS for chart labeling:
-//             - CHOPPY              → SC_BLOCKED  ("! BLOCKED" magenta)
-//             - RANGING/LONG_RANGING/EARLY_BREAKOUT → SC_SOFT
-//                                                    ("LIMITED" yellow)
-//             - DIRECTIONAL/STRONG_DIR/CONFIRMED_TREND → SC_VALID
-//                                                    ("^ BUY" green)
-//           Final chart label = harshest(filter_class, regime_class)
-//           where rank: VALID(0) < SOFT(1) < BLOCKED(2). Filter VALID +
-//           regime CHOPPY → BLOCKED label. Filter SOFT + regime
-//           DIRECTIONAL → SOFT label. RANGING/LONG_RANGING/EARLY_BR
-//           keep their existing entry rules (mid-range block, breakout
-//           direction match) — label is LIMITED regardless of whether
-//           regime gate blocks the specific signal direction.
-//   [NEW]   ScanHistory now re-evaluates regime at each historical
-//           signal bar via ComputeRegimeAt(shift, &state), so chart
-//           history shows the same harshest-wins label as live. Cost
-//           is one extra ATR/EMA/ER read per historical signal — fine
-//           with the existing 4000-bar scan cap.
-//   [REFACTOR] UpdateMarketRegime split into ComputeRegimeAt(shift, &st)
-//              (pure, shift-aware) + UpdateMarketRegime() wrapper that
-//              calls ComputeRegimeAt(1, ...) and writes the live globals.
-//              CountCrossesIn gained an optional anchor parameter so
-//              historical chop detection scans bars anchor+1..anchor+N.
-//   [INPUTS] New: InpRegime_ER_DirectionalMin=0.35 (lower bound for
-//            DIRECTIONAL fallback), InpRegime_ER_StrongDirMin=0.55
-//            (lower bound for STRONG_DIRECTIONAL). Existing ChoppyMax
-//            (0.20) and NeutralMax (0.35) thresholds preserved.
-//   [PANEL] Regime row gained DIR / STRONG-DIR tags. Both render green
-//           since they're VALID-class. Color of LIMITED-class regimes
-//           (RANGING/LONG_RANGING/EARLY_BR) is yellow on the row to
-//           match the chart label.
-//   [HASH]  Logic-version marker bumped to (uint)0x13C00000 — the new
-//           inputs and new fallback paths affect deterministic regime
-//           classification, so all .set files from v13.10.x trigger a
-//           clean ScanHistory rescan on upgrade.
-//
-// CHANGELOG v13.10.1 (compile-time fixes for v13.10.0 regressions):
-//   [FIX]   FMA-X (Fast MA Protective Exit) referenced the legacy
-//           g_last_entry_was_f11 flag at one callsite — the v13.10.0
-//           rename F11→F3 missed it, so the EA failed to compile with
-//           "undeclared identifier 'g_last_entry_was_f11'". Renamed to
-//           g_last_entry_was_f3 to match the declaration and the rest
-//           of the codebase.
-//   [FIX]   ComputeCrossPriceLI declared ef[2]/es[2] as static-sized
-//           arrays then called ArraySetAsSeries on them, triggering the
-//           MetaEditor warning "cannot be used for static allocated
-//           array". Switched both to dynamic arrays (double ef[],es[])
-//           — same pattern already used by the other ComputeCrossPriceLI
-//           callsites at lines 2924/2932/3720. CopyBuffer auto-resizes
-//           on dynamic arrays, so semantics are unchanged.
-//   [HASH]  Logic-version marker bumped to (uint)0x13B00010.
-//   [NOTE]  The 3-part property-version string still triggers an MQL5
-//           Market warning ("must be xxx.yyy"). Intentional — the X.Y.Z
-//           rule (since v13.9.10) needs the Z segment to support
-//           two-digit patch numbers. EA still compiles + loads; only
-//           MQL5 Market upload would require flattening.
-//
-// CHANGELOG v13.10.0 (filter stack prune + renumber + Market Regime detector):
-//   [BREAK] Massive prune of legacy filter stack and meta-systems. Removed
-//           entirely: Filter Mode (FM_STANDALONE / FM_SCORING and all
-//           scoring weight inputs), Judge System (composite scoring +
-//           F0/F13 override, F11 Judge gate), F1 HTF EMA100, F2 HTF EMA9,
-//           F3, F4, F5, F6, F8 (already forced OFF, dead code purged),
-//           F10 MA Slope/Parallel-Drift (preset enum + 14 knobs), F12
-//           Bulls/Bears Power, F13 HTF Running/Exhaustion (+ ReportOnly +
-//           RVI composite), Volatility Regime, Switch Proxy, Trailing DD
-//           Circuit Breaker, and Circuit Breaker (DD/loss-streak/spread).
-//           All associated inputs, enums, handles (h_htf_ema100, h_htf_ema9,
-//           h_f13_*, h_bulls, h_bears), global state, dashboard rows,
-//           historical evaluators, and EvaluatePipeline branches are gone.
-//   [RENUM] Surviving filters renumbered for clarity:
-//             F0 EMA Gap                  →  F0 (no change)
-//             F7 DI+/DI- Validation       →  F1
-//             F9 Crossing-to-Entry Dist   →  F2
-//             F11 False-Block Recovery    →  F3
-//             F14 Slow MA Direction       →  F4
-//             F15 RVI Overbought/Oversold →  F5
-//           Intelligent Filter (IF) and Wick detector keep their names —
-//           they were never numbered F* filters.
-//   [NEW]   Market Regime detector (issue #11) — classifies current bar
-//           into one of five regimes and gates entries accordingly:
-//             1. CHOPPY        — NO TRADE (block all entries)
-//             2. RANGING       — block at 40-60% range, allow breakout/retest
-//             3. LONG_RANGING  — block middle, breakout-only with retest
-//             4. EARLY_BREAKOUT — allow with reduced lot (0.5x)
-//             5. CONFIRMED_TREND — best mode for MA crossing
-//           Built on ATR(5) fast + ATR(14) base + ATR(20) slow, Efficiency
-//           Ratio (M1 N=14, M5 N=10..14), reuses EMA20/EMA50 from IF and
-//           ADX(14)+DI from existing F1 stack. Toggle via InpRegime_Enable;
-//           each regime has independent on/off + action input.
-//   [F11]   F11 (now F3) recovery visual confirmed: HideBlockedLabelForF3
-//           clears the BLOCKED label at the original block bar, then
-//           DrawF3RecoveryVLine paints an orange OBJ_TREND scoped to the
-//           recovery candle high+pad / low-pad, and DrawSignalLabel
-//           SC_F3_RECOVERY drops the orange "^/v F3 BUY/SELL" label.
-//           Live + historical paths both verified.
-//   [HASH]  Logic-version marker bumped to (uint)0x13B00000.
-//
-// CHANGELOG v13.9.21 (F0 dashboard operator clarity + F11 exit gate bypass):
-//   [UX]    Dashboard F0 row format was "<gap>pt<<threshold>" with the
-//           "<" treated as a separator. Field report: that reads as
-//           "17 < 10" which is mathematically wrong and made users
-//           think F0 blocked when it didn't. The operator is now
-//           dynamic — "<" only when the gap is actually below the
-//           threshold (i.e. F0 is triggered), ">=" otherwise. So a
-//           passing F0 with gap 17 / threshold 10 reads as
-//           "17pt>=10" instead of "17pt<10". Color (red on trigger,
-//           grey when OK) still conveys the trigger state.
-//   [FIX]   Fast MA Protective Exit (FMA-X) refused to arm on F11
-//           recovery entries because its InpEarlyExit_MinGapATR gate
-//           required the EMA fast / slow MA gap to be ≥ 1.0 ATR
-//           before exits would fire. F11 fires right at the cross,
-//           where that gap is by definition near zero — so the
-//           protective exit silently bypassed F11 trades. Now the
-//           MA-gap gate is skipped when the active position came in
-//           via F11 (g_last_entry_was_f11=true). F11 entries are
-//           SOFT to begin with, so reactive fast-MA exits match the
-//           tighter risk profile.
-//   [HASH]  Logic-version marker bumped to (uint)0x13A50000.
-//
-// CHANGELOG v13.9.20 (VR / TrailDD always block + F11 skip-VR toggle):
-//   [FIX]   Volatility Regime (VR_PAUSE) and Trailing-DD Circuit Breaker
-//           are operational kill switches; they should always block a
-//           signal regardless of which Filter Mode is active. In
-//           STANDALONE they already join the HARD OR; in SCORING they
-//           previously only voted if the user assigned a non-zero
-//           weight, so VR_PAUSE active with InpVR_ScoringWeight=0
-//           (the default) let signals pass scoring. Both h_vr and
-//           h_tdd now override the SCORING decision the same way the
-//           Intelligent Filter h_if override added in v13.9.16 does —
-//           if either is set, g_pipe_hard becomes true and the signal
-//           is BLOCKED, not just SCORE-low.
-//   [UX]    BLOCKED-label reason text in OnTick now identifies VR /
-//           TrailDD / IntelliFltr / F9 / F14 / F15 / F1 / F7 as the
-//           triggering filter when none of the previously-recognised
-//           ones (F0/F10/F12/F13) is the cause, instead of the generic
-//           "FILTER".
-//   [NEW]   InpF11_BlockOnVR (default true) — F11 recovery refuses to
-//           fire when VR_PAUSE is active. Live ArmF11Recovery returns
-//           early with reason VR_BLOCK; historical FindF11RecoveryAt
-//           recomputes the ATR ratio at block_idx (ATR(idx) / mean ATR
-//           over InpVR_ATR_AvgPeriod) and skips the recovery when the
-//           ratio crosses InpVR_HighThreshold under VR_PAUSE.
-//   [HASH]  Logic-version marker bumped to (uint)0x13A40000.
-//
-// CHANGELOG v13.9.19 (F11 distance gate + refire window + DIAG_F11 cleanup):
-//   [NEW]   InpF11_MaxDistATR (default 1.5) — F11 recovery refuses to
-//           fire when |recovery_price - cross_price| exceeds this many
-//           ATR. Cross price uses the same linear-interp geometry that
-//           v13.9.15 introduced for F9 so the two filters agree on what
-//           "distance from cross" means. Applied in both live
-//           ProcessF11Recovery and historical FindF11RecoveryAt.
-//   [NEW]   F11 refire window. New inputs:
-//             InpF11_AllowRefire       = true   (default ON)
-//             InpF11_RefireMaxBars     = 10
-//             InpF11_RefireMaxDistATR  = 1.5
-//           After F11 fires and the resulting trade is closed, the
-//           usual InpF11_CooldownBars gate normally blocks a second
-//           attempt. With AllowRefire on, that gate is bypassed when
-//             - bars_since_first_fire < RefireMaxBars
-//             - |current_price - cross_at_first_fire| < RefireMaxDistATR×ATR
-//           i.e., the original setup is still geometrically intact.
-//           New globals g_f11_fire_time / g_f11_fire_cross_px /
-//           g_f11_fire_atr capture the first-fire context.
-//   [UX]    Removed the "? F11" gray DrawDiagMarker from
-//           FindF11RecoveryAt's ScanHistory path. It was being drawn at
-//           the same bar as the orange F11 SELL/BUY label and just
-//           clipped behind it. The label alone is enough.
-//   [HASH]  Logic-version marker bumped to (uint)0x13A30000.
-//
-// CHANGELOG v13.9.18 (F11 vline short + skip-F9 toggle + dashboard z-order):
-//   [UX]    F11 recovery vertical marker is no longer a full-height
-//           OBJ_VLINE. Switched to an OBJ_TREND segment that spans just
-//           the candle bar (high+padding to low-padding) so the marker
-//           is visually scoped to the recovery bar like the regular
-//           signal-bar candle highlight, not a chart-wide line.
-//   [NEW]   InpF11_BlockOnF9 (default true) — when on, F11 recovery
-//           refuses to fire for signals that were blocked by F9
-//           (Crossing-to-Entry Distance). Both the live ArmF11Recovery
-//           and the historical FindF11RecoveryAt re-check F9 at the
-//           block bar before arming/searching. Late entries that F9
-//           filtered out aren't a "false block" — letting F11 break
-//           them back in defeats F9's purpose.
-//   [DASH]  Dashboard panel objects (DB_BG, DB_B_*, DB_L_*, DB_V_*,
-//           DASH_BTN) now set OBJPROP_ZORDER high so they render on
-//           top of chart-coord objects (signal text labels, TP/SL
-//           HLINEs, exit markers). Previously signal labels at low
-//           prices and TP lines could visually punch through the
-//           dashboard's left margin.
-//   [HASH]  Logic-version marker bumped to (uint)0x13A20000.
-//
-// CHANGELOG v13.9.17 (Intelligent Filter dashboard + panel layout tweaks):
-//   [DASH]  Add "IntelliFltr" row to the dashboard so the user can see the
-//           Intelligent Filter's current state without per-bar chart
-//           visualisation. Format: "<TREND> <STATE>" where TREND is
-//           UP / DN / FLAT and STATE is one of:
-//             ALIGN     — signal direction matches trend (allowed)
-//             OUT-BAND  — counter-trend, price outside EMA20/EMA50 (block)
-//             BAND      — counter-trend, price in band, exhaustion OFF (block)
-//             EXH-OK    — counter-trend, price in band, exhaustion confirmed (allow)
-//             EXH-NO    — counter-trend, price in band, exhaustion NOT confirmed (block)
-//           State globals only update during live evaluation (idx==1) so
-//           historical ScanHistory passes don't clobber the live readout.
-//           Per the v13.9.16 spec the filter still draws no chart labels,
-//           markers, or trend lines.
-//   [DASH]  DB_PANEL_W widened 285 → 320 so longer reason texts (Judge
-//           breakdown, IntelliFltr "DN OUT-BAND", etc.) don't get clipped.
-//           PANEL toggle button moved CORNER_RIGHT_UPPER XDISTANCE 6 → 90
-//           so it isn't glued against the right edge of the chart.
-//   [HASH]  Logic-version marker bumped to (uint)0x13A10000.
-//
-// CHANGELOG v13.9.16 (F11 BLOCKED-hide + vline; new Intelligent Filter):
-//   [UX]    When F11 recovers a previously-blocked signal, the BLOCKED
-//           text label at the original block bar is now removed so the
-//           chart only shows the F11 recovery (orange ^/v F11 BUY/SELL
-//           label) instead of the contradictory pair. The SIGBAR_ /
-//           SIGBK_ candle highlights stay because they mark the cross
-//           bar regardless of classification.
-//           Plus a vertical line (OBJ_VLINE) is drawn at the F11 entry
-//           bar in DB_CLR_ORANGE (same hue as the F11 label) to make
-//           the recovery point easy to spot when scrolled out. New
-//           object prefix F11VLINE_<ts> added to the
-//           CleanupHistoricalSignalLabels sweep.
-//   [NEW]   "Intelligent Filter" — a self-contained EMA20/EMA50 short-
-//           trend gate. Toggle on/off; reads EMA20 and EMA50 on the TF
-//           chosen by InpIF_TF (PERIOD_CURRENT means "the chart's own
-//           timeframe"). Rules:
-//             - Uptrend (EMA20 > EMA50): only BUY allowed.
-//             - Downtrend (EMA20 < EMA50): only SELL allowed.
-//             - Counter-trend signal with price OUTSIDE the EMA band
-//               (further than the slower EMA): blocked unconditionally.
-//             - Counter-trend signal with price BETWEEN EMA20 and EMA50,
-//               AND InpIF_UseExhaustion=true: allowed only when the
-//               opposing trend is exhausted (either RVI extreme or
-//               Stochastic %K extreme on the same TF). Otherwise blocked.
-//           When InpIF_UseExhaustion=false, every counter-trend signal
-//           is blocked. When InpIF_Enable=false, the filter is a no-op.
-//           Per spec, the filter has no dashboard row, no signal labels,
-//           and no visualisation — it sits purely between signal detect
-//           and execution.
-//   [HASH]  Logic-version marker bumped to (uint)0x13A00000.
-//
-// CHANGELOG v13.9.15 (F9 cross-price + ATR-per-bar accuracy fix):
-//   [FIX]   F9 was using two coarse approximations that let late entries
-//           past the InpF9_MaxDistATR gate. Field report: ATR=1.77 (177
-//           pts), InpF9_MaxDistATR=1.5 → expected threshold 265.5 pts,
-//           but visible distance entry-to-cross on chart was 466 pts and
-//           F9 still passed.
-//           1. cross_px = mean(ef[0], es[0], ef[1], es[1]) drags the
-//              estimate toward the post-cross MA values. When the post-
-//              cross divergence is large (strong follow-through), the
-//              mean ends up nearer to the entry than the geometric cross
-//              point. F9 then computes a shorter |entry - cross| than
-//              the user measures on chart. Replaced with a linear
-//              interpolation between bar idx+1 and bar idx using the
-//              ef-es deltas — this yields the true geometric cross
-//              price where the two MA lines meet.
-//           2. atr_use defaulted to g_atr_val (live ATR at bar 1) even
-//              when EvalF9At was called from EvaluatePipelineAt with
-//              idx > 1, meaning historical signals were judged against
-//              the current chart's ATR rather than their own. Now the
-//              evaluator reads ATR at idx and falls back to g_atr_val
-//              only if the buffer copy fails.
-//   [HASH]  Logic-version marker bumped to (uint)0x139F0000.
-//
-// CHANGELOG v13.9.14 (F13 RVI composite exhaustion + new F15 RVI OB/OS filter):
-//   [NEW]   F13 optional RVI composite exhaustion check. When
-//           InpF13_UseRVIExhaust=true (default false to preserve v13.9.13
-//           behavior), F13 reads RVI on InpF13_TF and adds an extra
-//           exhaustion vote: BUY blocked if RVI > InpF13_RVI_OBLevel,
-//           SELL blocked if RVI < InpF13_RVI_OSLevel. Combine mode via
-//           InpF13_RVI_RequireAND — false = OR (gap_atr OR rvi triggers
-//           exhaustion), true = AND (both must agree). RVI value is
-//           stashed in g_f13_rvi and shown on the F13 dashboard row.
-//   [NEW]   F15 = standalone RVI Overbought/Oversold filter. Reads RVI
-//           on a user-chosen TF (default PERIOD_CURRENT) and blocks the
-//           signal when momentum is over-extended in the signal
-//           direction. Optional signal-line confirmation (InpF15_
-//           UseSignalLine) adds the classic RVI-vs-signal cross check.
-//           Defaults: Action=F_OFF, Period=10, OBLevel=0.65,
-//           OSLevel=-0.65 — opt-in like F14 / F11. New
-//           InpF15_ScoringWeight = 10.0 plugs F15 into FM_SCORING.
-//   [DASH]  New F15 row added between F14 and Judge. F13 row appends
-//           " R<rvi>" when InpF13_UseRVIExhaust is on so the value
-//           feeding the composite decision is visible.
-//   [HASH]  Hash absorbs all new inputs (4 for F13 RVI composite, 5 for
-//           F15, plus InpF15_ScoringWeight). Logic-version marker
-//           bumped to (uint)0x139E0000.
-//
-// CHANGELOG v13.9.13 (F11 historical OnlyF0Blocks + active-trade TP/SL):
-//   [FIX]   FindF11RecoveryAt (used by ScanHistory) did not honor
-//           InpF11_OnlyF0Blocks, while the live ArmF11Recovery does.
-//           Field report: enabling F14 + F13 made signals "appear valid"
-//           after a block — the orange "F11 BUY/SELL" recovery label
-//           was being drawn next to BLOCKED labels for non-F0 blocks
-//           (e.g. F14-triggered ones), creating the illusion of an
-//           override. Now the historical scan re-evaluates F0 at the
-//           block bar and refuses to mark an F11 recovery unless F0 is
-//           among the triggering filters (when InpF11_OnlyF0Blocks=true,
-//           which is the default). Matches the live arming gate.
-//   [FIX]   F11 recovery TP / SL / Entry trend lines (added in v13.9.12)
-//           now only render when the hypothetical trade is still "open"
-//           — i.e. between the recovery bar and the current bar, price
-//           has not yet closed beyond the final TP (TP2) or the SL.
-//           Stale recoveries from earlier in history no longer paint a
-//           cluster of lines that the user has to mentally filter out.
-//   [HASH]  Logic-version marker bumped to (uint)0x139D0000.
-//
-// CHANGELOG v13.9.12 (visualise Entry/SL/TP at historical F11 recoveries):
-//   [NEW]   ScanHistory now draws a dotted Entry / SL / TP1 / TP2 trend
-//           line cluster at each F11 recovery point it discovers, so the
-//           user can see what the EA's planned levels would have been.
-//           Lines extend 30 bars forward from the recovery bar, anchored
-//           by time, so they only cover the relevant region instead of
-//           painting the entire chart like the live OBJ_HLINE TP/SL.
-//           Live F11 fires were already covered — ProcessF11Recovery
-//           calls DrawTPSLLines() after EAOpen(), and that renders the
-//           normal chart-wide HLINE set. The historical scan path was
-//           the gap.
-//           Dotted style (STYLE_DOT) plus distinct colors (blue entry,
-//           crimson SL, lime-green TPs) keep the cluster visually
-//           separate from solid live TP/SL lines. Multipliers honor
-//           InpF11_EnterAsSoft — soft-mode recoveries get the
-//           InpSoft_* tighter levels.
-//           New object prefix F11LINE_<ts>_<EN|SL|TP1|TP2> added to
-//           CleanupHistoricalSignalLabels so TF switches scrub them
-//           together with the rest of the timestamp-anchored visuals.
-//   [HASH]  Logic-version marker bumped to (uint)0x139C0000.
-//
-// CHANGELOG v13.9.11 (TF-switch SIGBAR/DIAG cleanup completion):
-//   [FIX]   After v13.9.10's TF-switch cleanup landed, a follow-up field
-//           report showed scattered green/red rectangle outlines and the
-//           gray "? SPREAD/SESSION/DAILY" markers still lingered on the
-//           chart after switching timeframes. Root cause: the cleanup
-//           prefix list covered SIG_B_ / SIG_S_ / SIGBK_ / F11M_ / DR_,
-//           but missed two more timestamp-anchored object families:
-//             SIGBAR_<ts>  — green or red 3px rectangle outline that
-//                            ColorSignalCandle draws around every signal
-//                            bar. With OBJ_RECTANGLE pinned to the M5
-//                            bar's [t0..t1] coords, a roundtrip M5→M15
-//                            leaves a tiny phantom rect inside an M15
-//                            candle at the wrong vertical position.
-//             DIAG_<reason>_<ts>  — the gray DrawDiagMarker spread/
-//                            session/daily skip annotations.
-//           Cleanup now also deletes those two families. The DR_ entry
-//           was a misnomer — DrawDR creates dashboard rows under
-//           prefix DR_<id> that are regenerated every tick, so removing
-//           it from the deletion list isn't strictly necessary but the
-//           comment is now corrected.
-//
-// CHANGELOG v13.9.10 (TF-switch label cleanup + F9 excluded from scoring):
-//   [FIX]   Switching chart timeframe (e.g. M5 → M15) left a forest of
-//           stale "v SELL" / "! BLOCKED BUY" labels at positions that did
-//           not match the new TF's MA crossings. Root cause: chart labels
-//           are timestamp-anchored, not TF-anchored, so labels drawn while
-//           on M5 stayed on the chart when MT5 redrew bars at M15 size.
-//           CleanupHistoricalSignalLabels was gated by ComputeFilterHash
-//           changes only, and the hash key was already per-(symbol, TF),
-//           so a TF round-trip (M5 → M15 → M5) found a matching cached
-//           hash on the second visit and skipped cleanup. Now OnInit also
-//           records the last _Period it ran under on a per-ChartID GV.
-//           When the previous TF differs from the current one, cleanup
-//           runs unconditionally before ScanHistory rebuilds labels at
-//           the new TF's signal bars.
-//   [CHG]   F9 (Crossing-to-Entry Distance) no longer participates in the
-//           FM_SCORING approval calculation per user direction. Removed
-//           InpF9_ScoringWeight (was 10.0 default). F9 still behaves
-//           normally under FM_STANDALONE — F_HARD still blocks, F_SOFT
-//           still flags soft. EvaluatePipeline and EvaluatePipelineAt both
-//           drop the F9 line from the scoring branch.
-//   [HASH]  Logic-version marker bumped to (uint)0x139A0000 so users
-//           upgrading from v13.9.9 get one cleanup pass on first load.
-//
-// CHANGELOG v13.9.9 (F0 dashboard threshold + filter hash coverage fix):
-//   [FIX]   Dashboard F0 EMAGap row now displays the resolved threshold
-//           instead of always showing InpGapPoints. When InpGap_UseATRPct
-//           is true the row prints "<gap>pt<<threshold> ATR<pct>%", so
-//           the comparison the evaluator is actually making is visible.
-//           Previously "47pt<100" showed even when ATR% mode was active,
-//           making it look like F0 ignored the % setting.
-//   [FIX]   ComputeFilterHash now covers tuning parameters of every
-//           filter, not just the F_OFF/F_SOFT/F_HARD action enum. Field
-//           symptom that uncovered this: changing F0 from 15% ATR to 5%
-//           ATR left the old BLOCKED labels on chart because hash only
-//           saw InpGap_Action. Toggling F0 off→on (which flipped the
-//           action enum) finally rescanned and the labels updated. Now
-//           changing any threshold value cleans up labels + reruns
-//           ScanHistory so the chart matches the live evaluator. Hash
-//           coverage added for F0/F1/F7/F9/F10 custom/F12/F13 tuning
-//           plus VR threshold. F10 custom params only feed the hash
-//           when InpF10_Preset == CUSTOM, so changes under NORMAL /
-//           LOOSE / STRICT presets don't spuriously rescan.
-//   [HASH]  Logic-version constant bumped to (uint)0x13990000 so users
-//           upgrading from v13.9.8 get one final fresh ScanHistory pass.
-//
-// CHANGELOG v13.9.8 (F14 minimum slope magnitude + Filter Mode scoring):
-//   [NEW]   F14 Slow MA Direction now supports a minimum slope magnitude
-//           threshold via InpF14_MinSlopePts (pts/bar, default 0.0 =
-//           preserve v13.9.7 direction-only behavior). When set > 0, F14
-//           requires |slope| >= threshold in the signal direction; flat
-//           markets with a tiny non-zero slope no longer slip past F14.
-//           Slope is computed as (s_now - s_back) / _Point / lookback.
-//   [NEW]   Filter Mode selector — InpFilterMode = FM_STANDALONE (default,
-//           identical to v13.9.7: each filter HARD-blocks independently)
-//           or FM_SCORING (filters with Action != F_OFF contribute their
-//           configured weight to a 0..100 approval percentage; signal
-//           passes when score >= InpScoring_MinScore). Default weights:
-//           F13 HTF Running = 20 (higher per user direction), all other
-//           signal-quality filters = 10, VR/SP/TrailDD = 0 (operational,
-//           don't vote by default). Judge override is force-disabled
-//           when FM_SCORING is active; OnInit prints a warning if the
-//           user enables both. EvaluatePipelineAt mirrors live behavior
-//           and also now evaluates F14 (integration gap from v13.9.7).
-//   [DASH]  New "FilterMode" row above FSUM showing mode + score/min
-//           when in SCORING mode. F14 row now displays slope value in
-//           pts/bar alongside lookback bars and OK/BLK state.
-//   [HASH]  ComputeFilterHash absorbs InpFilterMode, InpScoring_MinScore,
-//           the 11 weight inputs, and InpF14_MinSlopePts. Logic-version
-//           constant bumped to 0x13980000U so upgrading users get a
-//           fresh ScanHistory pass on first load.
-//
-// CHANGELOG v13.9.7 (F0 signal-bar fix + F14 Slow MA Direction filter):
-//   [FIX]   F0 EMA Gap now evaluates the gap at the SIGNAL bar (bar 1,
-//           just-closed) instead of the forming bar (bar 0). The v13.7.x
-//           comment claimed F0 was already doing this but the code was
-//           still using `_b0` look-ahead values. Symptom in the field:
-//           dashboard shows gap < threshold yet signal is not blocked
-//           because the look-ahead bar's first ticks had widened the
-//           gap. ScanHistory's F0 path is also updated for consistency
-//           (la = idx instead of idx-1). Filter hash bumped via a
-//           logic-version constant so upgrading users get a fresh
-//           scan on first load.
-//   [NEW]   F14 Slow MA Direction — lightweight visual filter as
-//           requested in the user's gambar-2 idea. Blocks the signal
-//           whenever the slow MA is not moving in the signal direction
-//           over the last InpF14_LookbackBars (default 3) bars. No
-//           minimum slope magnitude — any non-zero direction counts.
-//           Default OFF. Cheap independent check that complements
-//           F0/F9/F10 without their stack of sub-conditions.
-//   [DASH]  Dashboard adds F14 row.
-//
-// CHANGELOG v13.9.6 (input label UX fix — readable names in MT5 dialog):
-//   [FIX]   Several inputs that had identical trailing-comment text
-//           ("v13.9.2: clean-slate default OFF") showed up in the MT5
-//           input dialog with the same label since MQL5 uses the
-//           trailing line comment as the displayed name. Replaced
-//           each with a short descriptive label so the Smart TP /
-//           Volatility / Switch Proxy / Trail DD / Circuit Breaker
-//           / Judge / Wick rows now read meaningfully. No logic
-//           change; this is purely cosmetic.
-//
-// CHANGELOG v13.9.5 (Progressive Exit Phase-0 grace period):
-//   [NEW]   Progressive Exit now has three phases instead of two.
-//           Phase 0 = first N bars after entry (default 4). Exit level
-//           is fast EMA shifted by InpPE_Phase0BufferATR × ATR away
-//           from price, giving the trade room to breathe while the
-//           fast MA is still close to entry. Without Phase 0, an early
-//           tick wick could close the trade before it has any chance
-//           to develop. After Phase 0 expires (bars_since_entry >=
-//           InpPE_Phase0Bars), Phase 1 takes over with the original
-//           fast-MA touch/close exit. Phase 2 (BEP lock after the
-//           configured TP) still overrides whichever earlier phase
-//           is active when the TP prints.
-//   [INP]   New inputs in Progressive Exit group:
-//             - InpPE_Phase0Bars        = 4    (1..50)
-//             - InpPE_Phase0BufferATR   = 0.5  (0.0..3.0 ATR multiples)
-//   [DASH]  Dashboard ProgExit row now shows Phase 0 state too:
-//           "P0 3/4 fast-0.5x@<price>" / "P1 fast@<price>" /
-//           "P2 BEP@<entry>".
-//
-// CHANGELOG v13.9.4 (Progressive Exit — fast-MA stop → BEP lock after TP2):
-//   [NEW]   Progressive Exit (PE) — a two-phase exit manager. While the
-//           configured BEP-lock TP level has not been hit, PE closes the
-//           position on a candle touch or close at the chart fast EMA
-//           (depending on trigger mode). After that TP level prints,
-//           PE moves the visual SL line to entry price (BEP / "SL+")
-//           and continues to monitor for any retrace back to entry,
-//           closing the position there if reached. Default OFF.
-//           Inputs: InpUsePE, InpPE_Trigger (TOUCH/CANDLE_CLOSE),
-//           InpPE_BEPAfterTP (which TP level arms BEP, default 2).
-//   [DASH]  New dashboard row "ProgExit" shows OFF / IDLE / P1 (fast@px)
-//           / P2 (BEP@px) state plus current target level.
-//
-// CHANGELOG v13.9.3 (BLOCKED color + filter-change auto-rescan + UX clarity):
-//   [UX]    BLOCKED signal labels now render in magenta instead of red, so
-//           they are visually distinct from the bear-candle color on chart.
-//   [FIX]   Filter setting changes (action toggles, Judge mode, F11/F13
-//           sub-toggles, core MA params) now invalidate historical signal
-//           labels at OnInit. Previously the v13.7.3 preservation logic
-//           kept old BLOCKED labels visible even after the user disabled
-//           the filter that caused them, creating confusion about whether
-//           the EA was still blocking signals. v13.9.3 stores a 32-bit
-//           hash of the filter signature in a chart-scoped GlobalVariable;
-//           if the hash differs from the last load, all SIG_/SIGBK_/F11M_
-//           markers are deleted before ScanHistory re-runs with current
-//           settings. Dashboard, panel button, license overlay, and exit
-//           markers are not touched.
-//   [DOC]   Note for users seeing "BLOCKED with no visible crossing":
-//           DetectSignal compares EMA_fast vs LWMA_slow strictly at bar
-//           close — when MAs are very close, sub-point sign flips are
-//           valid mathematical crossings even if visually invisible. The
-//           label shows the EA is doing its job; the BLOCKED reason will
-//           still be HTF/F0/F10/etc. from whichever filter is enabled.
-//
-// CHANGELOG v13.9.2 (clean-slate defaults — core MA + all features OFF):
-//   [CHANGE] Core slow MA defaults: InpSMA_Slow 18 → 20 and
-//            InpSlowMA_Method MODE_SMA → MODE_LWMA. LWMA20 places more
-//            weight on recent bars, which on XAUUSD scalping tracks the
-//            current swing more closely than SMA20 while still smoothing
-//            tick noise.
-//   [CHANGE] Every feature toggle now defaults to OFF so a fresh install
-//            runs as a pure crossing EA. Filters F0/F1/F7/F9/F10/F12/F13
-//            were already F_OFF; the following are now also OFF by default:
-//              - InpJudge_Mode = JUDGE_OFF (was JUDGE_REPORT_ONLY)
-//              - InpWick_UseFilter = false (was true)
-//              - InpUseVolRegime = false (was true)
-//              - InpUseSwitchProxy = false (was true)
-//              - InpUseTrailDD = false (was true)
-//              - InpUseSmartTP = false (was true)
-//              - InpSTP1_UseSubZones / InpSTP2_UseSubZones / InpSTP3_UsePartial
-//                = false (were true)
-//              - InpUseCB (Circuit Breaker) = false (was true)
-//            Rationale: trader should enable each feature deliberately and
-//            audit its impact before stacking. F11 / F13 ReportOnly / SL /
-//            Early Exit / Adaptive Reversal / Spike SL / DailyLoss /
-//            DailyProfitStop / Session / ManualTP / IndicatorOnly were
-//            already OFF and remain unchanged.
-//
-// CHANGELOG v13.9.1 (F10 slow-slope requirement disabled across presets):
-//   [CHANGE] F10 preset NORMAL and STRICT no longer require the slow MA to
-//            also lean with the signal — fast MA slope is sufficient
-//            directional validation, and slow MA on M5/M15 changes too
-//            slowly to be reliable confirmation. Previously slow-slope
-//            requirement caused valid trend continuations to be blocked
-//            because the slower SMA hadn't fully rotated yet.
-//   [CHANGE] InpF10_RequireSlowSlope default flipped from true to false so
-//            fresh installs and CUSTOM mode also start without slow-slope
-//            gating. Users can still set it true in CUSTOM mode if they
-//            want the legacy behavior.
-//
-// CHANGELOG v13.9.0 (Judge System + F10 preset + F11 hardening + Wick filter):
-//   [NEW]   Judge System — composite scoring engine (0..100) that aggregates
-//           momentum, pressure, volatility regime, candle quality, cross
-//           distance, and HTF alignment into a single probability score.
-//           When score is high enough the Judge can override HARD blocks from
-//           F0 (small EMA gap) and optionally F13 (HTF disagreement). Targets
-//           the issue-#10 false-block scenario where structural filters skip
-//           valid continuation entries that still have strong momentum.
-//   [NEW]   F10 Preset (LOOSE / NORMAL / STRICT / CUSTOM) — collapses the 14
-//           tuning knobs of F10 into one selector. Default NORMAL matches the
-//           v13.8.0 setting profile for M5; LOOSE relaxes slope/expansion for
-//           M1/early-trend; STRICT tightens for M15+ trend mode. CUSTOM keeps
-//           the legacy per-parameter behavior.
-//   [NEW]   Wick / Liquidity Sweep detector — feeds the Judge candle component
-//           and gates F11 recovery. Distinguishes a stop-hunt against the
-//           intended entry (penalty) from a flush against opposition (bonus).
-//   [HARD]  F11 recovery now gated by Judge minimum score, a post-loss
-//           cooldown, MA cross-density (anti-sideway), and the wick sweep
-//           detector. Eliminates the "F11 reentry death loop" in ranging
-//           XAUUSD M5 reported in issue #10.
-//   [CHANGE] F13 keeps full evaluation for the dashboard but can be set to
-//           ReportOnly mode so it never blocks live entries — useful for
-//           observation periods or when delegating the HTF decision to Judge.
-//   [DASH]  Dashboard adds a JUDGE row showing aggregate score, decision
-//           (OFF / OBS / NEUTRAL / OVERRIDE / CONFIRM), and a compact
-//           breakdown so the trader can read why the Judge fired.
-//   [LOG]   Every Judge override prints a single audit line with the score
-//           breakdown so post-trade review is possible without telemetry.
-//
-// CHANGELOG v13.8.0 (F13 settings cleanup):
-//   [CHANGE] F13 HTF fast/slow MA periods and slow method are now inherited
-//            from the core EA MA settings instead of separate visible inputs,
-//            keeping HTF confirmation aligned with the chart strategy DNA.
-//
-// CHANGELOG v13.7.8 (F13 HTF running-signal alignment):
-//   [NEW]   F13 HTF Running Signal & Exhaustion Filter checks whether the
-//           higher timeframe MA state agrees with the chart signal. Example:
-//           M15 BUY can be skipped if H1 running direction is SELL.
-//   [NEW]   Optional HTF exhaustion guard blocks aligned entries when the HTF
-//           ribbon is already over-extended and momentum is fading.
-//   [DASH]  Dashboard shows F13 HTF direction, gap-vs-ATR, and reason.
-//
-// CHANGELOG v13.7.7 (F11 scan audit + cleanup/retired removal):
-//   [NEW]   ScanHistory now audits every HARD-blocked historical signal for
-//           possible F11 false-block recovery and draws an F11 re-entry marker
-//           where the blocked candle is later broken.
-//   [NEW]   F11 receives choppy/ranging protection to avoid firing inside
-//           volume/range regimes, plus optional F12 pressure confirmation.
-//   [NEW]   Daily profit stop blocks new entries after realized EA profit
-//           reaches a user target, mirroring the daily loss guard.
-//   [NEW]   Smart TP has separate toggles for TP1 sub-zones, TP2 sub-zones,
-//           and TP3+ reversal partials.
-//   [FIX]   Parameter reload no longer repaints an already BLOCKED historical
-//           signal into a normal BUY/SELL label; full object cleanup is forced
-//           when the EA is actually removed.
-//   [CHANGE] Retired features are removed from Inputs/Dashboard and kept only
-//           as internal constants where needed for legacy code compatibility.
-//
-// CHANGELOG v13.7.6 (broker SL + volume accounting guard):
-//   [NEW]   When SL Hardline Trigger is TOUCH, the EA now sends the SL price
-//           to the broker/server order field so the S/L column is populated
-//           and the broker-side stop can protect the position. Candle-close
-//           mode remains EA-managed only and does not attach broker SL.
-//   [FIX]   Partial-close requests now verify trade retcodes and resulting
-//           server volume before advancing phase state. A local closed-lot
-//           accumulator caps partial requests so cumulative partial closes
-//           cannot exceed the original EA lot.
-//   [DOC]   Added a simple v13.7.6 user manual and notes about MT5 history
-//           volume display after partial closes.
-//
-// CHANGELOG v13.7.5 (manual TP target exit):
-//   [NEW]   Manual TP Target Exit lets the user choose the TP level that
-//           closes the position automatically, e.g. TP2. The trigger uses
-//           live Bid/Ask touch and closes the whole remaining EA position.
-//   [NEW]   Manual TP can optionally allow or suppress the Smart-TP partial
-//           system before the selected final TP level. If partials are OFF,
-//           the EA holds the full position until the chosen TP is touched.
-//
-// CHANGELOG v13.7.4 (approved filter set + Smart TP1/partial safety):
-//   [CHANGE] Smart TP1 now uses 2 progressive sub-zones instead of 5.
-//           Each zone closes half of InpSTP1_Pct, preventing micro-lot
-//           partial slices that could fail after TP1 was already passed.
-//   [FIX]   Smart TP partial closes are rejected unless the server position
-//           direction still matches runtime direction and floating profit is
-//           positive, protecting against stale-state partials in loss.
-//   [FIX]   Smart SL is now disabled by default and also hard-disabled by the
-//           approved-feature gate so it cannot partial-close loss positions.
-//   [CHANGE] Approved active-entry stack is F0, F1 optional, F7 optional,
-//           F9, F10, F11 recovery, F12, VR, SwitchProxy, spread, session,
-//           daily-loss, and trailing-DD. Legacy F2/F3/F4/F5/F6/F8 plus
-//           late-entry, classic reentry, retest, and Smart SL are forced off.
-//
-// CHANGELOG v13.7.3 (attach-scan no-auto-entry + panel move):
-//   [FIX]   ScanHistory is now visual-only and no longer writes runtime
-//           trade state from historical VALID/SOFT signals. A blocked latest
-//           signal therefore cannot leave stale SELL state/TP-SL lines that
-//           trigger LateEntry after attaching the EA.
-//   [FIX]   Initial attach now reconciles real server position before any
-//           LateEntry check. Historical labels remain visual references only.
-//   [UI]    PANEL button moved below the top-right Dachi Trader title area.
-//
-// CHANGELOG v13.7.2 (F10 compression sideway + TP/SL line sync):
-//   [NEW]   F10 sideway model #4: compressed ribbon drift. Blocks crosses
-//           when fast/slow lines remain tightly overlapped across a short
-//           lookback, even if both lines drift in the same direction.
-//   [FIX]   TP/SL visual state is now cleared whenever runtime trade state
-//           is reset, and every non-blocked fresh signal updates the visual
-//           levels before order handling. This prevents old SELL TP/SL lines
-//           from staying on chart after a new BUY marker appears.
-//   [FIX]   Position-sync now rebuilds fallback levels from server position
-//           price when the broker has an open EA position but internal signal
-//           state was reset.
-//
-// CHANGELOG v13.7.1 (Bulls/Bears confirmation + REV marker/manual):
-//   [NEW]   F12 Bulls/Bears Power Confirmation adds optional directional
-//           pressure validation for M5/M15 false-cross reduction.
-//   [FIX]   Opposite raw cross now draws a REV BUY/SELL marker before any
-//           close attempt, so the reversal candle remains visible as an
-//           exit reference even if broker/server close confirmation fails.
-//   [DOC]   User manual refreshed for v13.7.x feature set.
-//
-// CHANGELOG v13.7.0 (M5/M15 false-cross protection rebuild):
-//   [REBUILD] F10 upgraded from simple numeric slope into MA Structure:
-//           slow-slope direction, separation expansion, hook-back, and
-//           weave-density checks for visual sideway / false-cross regimes.
-//   [NEW]   F11 False-Block Recovery Entry arms after a HARD blocked cross
-//           (optionally F0-only) and enters only if price breaks the blocked
-//           signal candle in the original direction.
-//   [NEW]   Hard SL can close on live touch or candle close. Default is
-//           touch mode for M5/M15 protection.
-//   [REBUILD] Early Exit on Slow MA is repurposed as Fast MA Protective
-//           Exit after MA gap expansion.
-//   [FIX]   Reverse-close now verifies the server position is actually gone
-//           instead of trusting a trade retcode alone, avoiding REV labels
-//           while the old position remains open.
-//
-// CHANGELOG v13.6.1 (Strategy Tester license bypass):
-//   [FIX]   MT5 Strategy Tester / Optimizer is a sandboxed environment
-//           with no WebRequest network access. The license verify call
-//           always failed in backtest, so the EA painted the
-//           UNAUTHORIZED overlay and refused to evaluate signals.
-//           Now LicenseIsBlocking() returns false whenever
-//           MQLInfoInteger(MQL_TESTER)==1 or
-//           MQLInfoInteger(MQL_OPTIMIZATION)==1. CheckLicence() also
-//           short-circuits in tester so the log isn't spammed with
-//           "WebRequest failed err=4014" noise.
-//           Dashboard "License" row reads "TESTER" (cyan) under those
-//           conditions for visibility. Live charts still enforce.
-//
-// CHANGELOG v13.6.0 (F10 MA-slope filter + F0 ATR-pct + F1 directional):
-//   [NEW]   F10: MA Slope / Parallel-Drift Filter. Blocks signals where
-//           the fast and slow MAs are nearly parallel with a tiny slope
-//           — typical of sideway/consolidation crosses that produce
-//           false signals (the user's screenshot showed a textbook
-//           example where both EMAs cross while drifting almost flat).
-//           Inputs:
-//             InpF10_Action          (OFF/SOFT/HARD, default OFF)
-//             InpF10_SlopeBars       (default 5)  — bars to measure slope
-//             InpF10_MinSlopePts     (default 3)  — min |slope| pts/bar
-//             InpF10_MaxParallelPts  (default 1.5) — max |Δslope| to
-//                                                    count as "parallel"
-//   [NEW]   F0 EMA Gap can now use a percentage of ATR instead of
-//           a fixed point threshold. Set InpGap_UseATRPct=true and
-//           InpGap_ATRPct (default 50) — threshold = ATR × pct/100.
-//           Lets the gap auto-scale on volatile vs quiet markets.
-//   [NEW]   F1 HTF EMA100 stair-step gains an optional directional
-//           alignment requirement. When InpF1_RequireDirection=true,
-//           a BUY signal is also blocked if the HTF EMA100 has not
-//           moved UP since the last signal (current ≤ stored), even
-//           when the magnitude threshold is satisfied. SELL likewise.
-//           This closes the "EMA100 swung sideways but moved enough"
-//           loophole the user reported.
-//
-// CHANGELOG v13.5.0 (license inputs hardcoded, session filter rebuild,
-//                    Switch Proxy any-timeframe, license-deny-no-grace,
-//                    full unauthorized cleanup):
-//   [SECURITY] All InpLicense_* inputs (Enabled, URL, HmacSecret,
-//           RecheckMin, GraceDays) are now #define / const. They no
-//           longer appear in the EA Properties dialog. The HMAC secret
-//           is embedded directly in the .mq5 / .ex5 — never distribute
-//           the source file to end users.
-//   [FIX]   When the license server returns valid=false with a correct
-//           HMAC signature, the EA now refuses to fall back to the
-//           offline grace cache. Previously a terminated subscription
-//           kept working until the cached verify aged out 7 days.
-//           Grace is now reserved for genuinely-unreachable scenarios
-//           (network down, HTTP error, bad signature).
-//   [REBUILD] Session filter logic flipped + auto-close on session
-//           exit. New semantics:
-//             InpSessionMon=true  → session filter ACTIVE on Monday,
-//                                   block trading outside the
-//                                   [InpSessionStart, InpSessionEnd)
-//                                   window
-//             InpSessionMon=false → no session filter on Monday, EA
-//                                   trades freely 24h
-//           Defaults flipped to false on every day so the filter
-//           opts-in. When the clock crosses the end-of-window on a
-//           filter-active day, any open EA position is auto-closed
-//           with reason "SESSION".
-//   [NEW]   InpSwitchProxy_AnyTimeframe — when true, the AND filter
-//           runs even on M5 / M1 (default false → keeps the M15+ auto
-//           gate the user is used to).
-//   [FIX]   Unauthorized overlay now actively removes the dashboard,
-//           ribbon, TP/SL lines, signal labels, and all DT prefixed
-//           objects on every tick — only the overlay text remains.
-//
-// CHANGELOG v13.4.1 (License gate hardening):
-//   [FIX]   v13.4.0 only blocked EAOpen() on license invalid, so an EA
-//           started in InpIndicatorOnly=true mode kept rendering signals
-//           and the dashboard. From this version the gate fires globally:
-//           every per-tick code path (signal detection, ribbon, dashboard,
-//           Smart-TP/SL, re-entry, retest, all of it) early-returns when
-//           InpLicense_Enabled=true AND g_license_valid=false. The chart
-//           displays a full UNAUTHORIZED ACCOUNT overlay instead.
-//   [NEW]   LIC_DrawUnauthorizedOverlay() — a red full-chart rectangle
-//           plus 3-line bold text. Repainted every OnTick so a manual
-//           ObjectDelete by the user is undone within seconds.
-//   [NEW]   On the very first OnInit where the license is found invalid,
-//           the EA also pops up an Alert("Dachi Trader: Unauthorized
-//           account...") so the operator notices even if the chart is
-//           minimised. Repeats once per OnTimer transition from valid
-//           to invalid (so a license that expires mid-day surfaces a
-//           fresh popup instead of silently blanking the chart).
-//   [NEW]   OnDeinit cleans up overlay objects.
-//
-// CHANGELOG v13.4.0 (Online license check + HMAC-SHA256 verify):
-//   [NEW]   LicenseClient module: every OnInit + every InpLicense_RecheckMin
-//           minutes the EA POSTs to /backend/api/license/verify.php with the
-//           current account number, parses the JSON response, and verifies
-//           the HMAC-SHA256 signature against InpLicense_HmacSecret. Match
-//           required for "valid".
-//   [NEW]   Offline grace cache: the most recent successful verify is
-//           persisted to a global variable (account number + expires_at +
-//           plan + verified_at). If the server is unreachable the EA keeps
-//           trading for InpLicense_GraceDays days using the cached result;
-//           after that, trade entries are blocked.
-//   [NEW]   Trade-gate integration: EAOpen() refuses to send orders when
-//           g_license_valid==false (mirrors the existing IndicatorOnly gate).
-//           Existing positions are not closed; only new entries are blocked.
-//   [NEW]   Dashboard row "License" shows status (OK <expiry> / GRACE Nd /
-//           DENIED / OFFLINE). Yellow during grace, red on denial.
-//   [NEW]   Inputs:
-//             InpLicense_Enabled       (bool, default true)
-//             InpLicense_URL           (string, default https://dachi-trader.com)
-//             InpLicense_HmacSecret    (string, must match server config)
-//             InpLicense_RecheckMin    (int, default 60 minutes)
-//             InpLicense_GraceDays     (int, default 7)
-//           Anda HARUS isi InpLicense_HmacSecret dengan secret yang sama
-//           seperti di backend config.php → license.hmac_secret.
-//   [SETUP] MT5 → Tools → Options → Expert Advisors → "Allow WebRequest
-//           for listed URL" → tambah https://dachi-trader.com supaya
-//           WebRequest tidak ditolak terminal.
-//
-// CHANGELOG v13.3.0 (Mar-19 mitigation + UX clean-up):
-//   [NEW]   Volatility Regime filter — measures ATR(14)/ATR_avg(50). When
-//           ratio >= InpVR_HighThreshold (default 1.5) the regime is "high
-//           volatility expansion". Action TIGHTEN (default) treats new
-//           signals as SOFT (forced Smart-SL, tight TP). Action PAUSE
-//           hard-blocks all entries.
-//   [NEW]   Switch Proxy (ATR-Normalized Deviation) — auto-active only on
-//           M15 and higher. Computes stdev(close,20)/ATR. AND > 0.7 marks
-//           the regime as "choppy" and forces SOFT entry. AND <= 0.7 has
-//           no effect. Designed to gate noisy regimes that look directional
-//           but are mean-reverting.
-//   [NEW]   Trailing Drawdown Circuit Breaker — tracks session peak
-//           equity. If current equity drops InpTrailDD_Pct (default 5%)
-//           below peak, hard-blocks entries until next trading day. Resets
-//           daily alongside the existing daily-loss tracker.
-//   [NEW]   RE-ENTRY label class (white) — when a previously-BLOCKED
-//           signal eventually fires after re-entry conditions are met, it
-//           is drawn as "RE-ENTRY BUY/SELL" white and forced into SOFT
-//           mode (tight TP, forced Smart-SL) regardless of the current
-//           pipeline soft/valid result. Same applies to retest re-entry.
-//   [FIX]   BLOCKED signals no longer draw entry / SL / TP lines on chart.
-//           They previously did via UpdateVisualForSignal in ScanHistory
-//           and OnTick BLOCKED branch — confusing because lines suggested
-//           an entry was placed when it wasn't. Now BLOCKED only renders
-//           the label.
-//   [FIX]   F0 EMA Gap dashboard row now displays the gap measured AT THE
-//           LAST SIGNAL bar (g_last_signal_gap_pts) instead of the live
-//           current-bar gap. The filter evaluates against signal-bar gap,
-//           so the dashboard now reflects the same number used for the
-//           HARD/SOFT decision. Fixes the "273pt > 100, but blocked"
-//           confusion (live gap 273, signal-bar gap was small).
-//
-// CHANGELOG v13.2.2 (Smart TP comparator consistency):
-//   [FIX]   Smart TP1 / Smart TP2 sub-zone reach test now compares the live
-//           tick price (Bid for BUY, Ask for SELL) instead of the forming
-//           bar's iHigh/iLow. Brings them in line with Smart SL (v13.2.1)
-//           and Smart TP3 — eliminates phantom-trigger when a bar wicks
-//           past a zone but retraces before close.
-//   [TOOL]  scripts/lint_mq5.py added: brace balance, version triplet
-//           consistency, stale-symbol deny list, function-coverage warn.
-//           Run before every commit.
-//
-// CHANGELOG v13.2.1 (Smart SL phantom-trigger fix + Spike simplified):
-//   [FIX]   Smart SL no longer fires on transient bar dips that recover.
-//           Was: compared bar-0 low/high against zone levels — a brief
-//           intra-bar dip on a profitable bar crossed a zone even though
-//           current price was still favorable.
-//           Now: compares live tick price (Bid for BUY, Ask for SELL)
-//           against the zone levels. Only confirmed adverse positioning
-//           triggers a partial.
-//   [REBUILD] Spike SL simplified to a pure adverse-velocity exit.
-//             Volume gate removed (InpSpike_VolMult and
-//             InpSpike_VolLookback inputs deleted). Trigger fires when
-//             the forming bar's worst adverse excursion vs entry exceeds
-//             InpSpike_ATR_Mult × entry ATR. Re-entry behaviour
-//             unchanged: spike exit does not arm re-entry; a fresh
-//             crossing signal still fires a new trade per the pipeline.
-//
-// CHANGELOG v13.2.0 (Smart TP sub-zone fix + Smart SL rebuild):
-//   [FIX]   Smart TP1 sub-phases now fire progressively at each 1/5 sub-zone
-//           between entry and TP1. Previously all 5 partials fired at once
-//           the moment TP1 was reached.
-//   [FIX]   Smart TP2 sub-phases now fire at each 1/2 sub-zone between TP1
-//           and TP2 (previously fired together on TP2 hit).
-//   [REBUILD] Smart SL reworked into a risk-mitigation scale-out: entry → SL
-//           is split into 5 equal zones; each adverse zone-touch closes 20 %
-//           of the initial lot. By the time the 5th zone (SL price) is hit
-//           the position is fully flat. Old P0 timeout / P1+P2 trailing /
-//           P3 floor logic removed, along with their inputs.
-//
-// CHANGELOG v13.1.0 (feature round):
-//   [REMOVED] DUP classification — every crossing now runs through the
-//           filter pipeline; same-direction crossings get a label but no
-//           physical entry while a position is active.
-//   [REBUILD] Spike SL uses intrabar adverse excursion vs entry (not SL
-//           price gate). Volume-gated. Does not arm re-entry.
-//   [NEW]   InpSlowMA_Method input — pick SMA / EMA / SMMA / LWMA for the
-//           slow line.
-//   [NEW]   Session filter gains Mon-Sun day toggles.
-//   [NEW]   F9 Crossing-to-Entry Distance filter (OFF/SOFT/HARD, default 1.5×ATR).
-//
-// CHANGELOG v13.0.1 (patch round):
-//   [FIX]   F1/F2 evaluated in ScanHistory using iBarShift-based HTF
-//           lookup. ScanHistory updates HTF memory progressively.
-//   [FIX]   SOFT label renamed to LIMITED (yellow). BLOCKED label white.
-//   [NEW]   UpdateVisualForSignal helper renders TP/SL lines for BLOCKED
-//           and LIMITED signals even when no position is active.
-//
-// CHANGELOG v13.0.0 (RESTART from v12.11.5 — new filter architecture):
-//   [ARCH]  Replaced fixed hard/soft layer system with per-filter OFF/SOFT/HARD
-//           toggle (ENUM_FILTER_ACTION). Each filter independently controls
-//           whether it blocks entry (HARD), tightens TP/SL (SOFT), or is
-//           ignored (OFF). No more overlapping layer coupling.
-//   [NEW]   F0–F8: EMA Gap / HTF EMA100 step / HTF EMA9 match / ADX / CHOP
-//           / RSI / Strong-trend override / DI validation / Zone breakout.
-//   [REMOVED] L1 Crossing Angle, L3 Bollinger, L4 M1 Sideway, Envelope, MinGap.
-//   [CHANGE] TP1 default 0.75×ATR, TP2 = TP1 + 0.75×ATR = 1.5×ATR from entry.
-//   [CHANGE] OBJ_PREFIX → "DT13_", trade comments → "DT13 BUY/SELL".
-//
-// © Daniel @danieljulyanto 2026. All rights reserved.
-// =============================================================================
+// Dachi_Trader_v13_11_12.mq5 — Expert Advisor
+// Version: 13.11.12
+// Clean Core branch: simplified runtime pipeline (F2 + HTF gate).
 
 #property copyright   "Daniel @danieljulyanto"
-#property version     "13.11.8"
-#property description "Dachi Trader v13.11.8 — Expert Advisor"
+#property version     "13.11.12"
+#property description "Dachi Trader v13.11.12 — Expert Advisor"
 
 #define MAX_TP            30
 #define VOL_AVG_PERIOD    20
@@ -1028,65 +61,68 @@ input bool   InpUseH1Bias         = true;
 input bool   InpAllowNeutralBias  = false;
 input bool   InpUseM15Setup       = true;
 input bool   InpAllowM15Neutral   = false;
+input bool   InpHTF_AllowReversalOverride = true;
+input double InpHTF_ReversalBodyATRMin    = 0.70;
+input double InpSideway_MinEMASlopePts    = 0.35;
 
-input group "=== F0: EMA Gap Filter ==="
-input ENUM_FILTER_ACTION InpGap_Action  = F_SOFT;
+// input group "=== F0: EMA Gap Filter ==="
+const ENUM_FILTER_ACTION InpGap_Action  = F_SOFT;
 input int    InpGapPoints       = 100;       // min gap bar-0 look-ahead (points)
 // v13.6.0: when true, the F0 threshold is computed dynamically as
 // ATR × InpGap_ATRPct/100 instead of the static InpGapPoints.
 // Useful when one EA preset is shared across high-vol (XAU news) and
 // low-vol regimes — point thresholds don't scale, ATR-pct does.
-input bool   InpGap_UseATRPct   = true;
-input double InpGap_ATRPct      = 35.0;      // % of ATR to require as min gap
+const bool   InpGap_UseATRPct   = true;
+const double InpGap_ATRPct      = 35.0;      // % of ATR to require as min gap
 
-input group "=== F1: DI+/DI- Validation (was F7 pre-v13.10.0) ==="
-input ENUM_FILTER_ACTION InpF1_Action   = F_SOFT;
-input double InpF1_Margin       = 3.0;       // DI margin
+// input group "=== F1: DI+/DI- Validation (was F7 pre-v13.10.0) ==="
+const ENUM_FILTER_ACTION InpF1_Action   = F_SOFT;
+const double InpF1_Margin       = 3.0;       // DI margin
 
 input group "=== F2: Crossing-to-Entry Distance (was F9 pre-v13.10.0) ==="
 // Block signals where close (entry) is too far from the MA crossing point.
 input ENUM_FILTER_ACTION InpF2_Action   = F_HARD;
 input double InpF2_MaxDistATR            = 1.7;  // max |entry - cross_price| in ATR
 
-input group "=== F3: False-Block Recovery Entry (was F11 pre-v13.10.0) ==="
+// input group "=== F3: False-Block Recovery Entry (was F11 pre-v13.10.0) ==="
 // Re-enters after a HARD blocked F0 cross only if price proves the block was
 // false by breaking the blocked candle in signal direction.
-input bool   InpF3_UseRecovery             = false;
-input bool   InpF3_OnlyF0Blocks            = true;
-input bool   InpF3_BlockOnF2               = true;   // never recover F2 (cross distance) blocks
-input int    InpF3_RecoveryBars            = 8;
-input double InpF3_BreakBufferATR          = 0.10;
-input ENUM_EXIT_TRIGGER InpF3_Trigger      = EXIT_ON_CANDLE_CLOSE;
-input bool   InpF3_RequireMAAligned        = true;
-input bool   InpF3_RequireDIDirection      = true;
-input bool   InpF3_EnterAsSoft             = true;
-input bool   InpF3_BlockChoppyRange        = true;   // block recovery in ranging/choppy regimes
-input double InpF3_MaxChoppyAND            = 0.65;   // stddev/ATR ceiling for F3 recovery
-input int    InpF3_CooldownBars            = 20;     // block F3 N bars after a losing F3 trade
-input bool   InpF3_BlockWickSweep          = true;   // skip F3 if last bar is a wick sweep against dir
-input int    InpF3_CrossDensityLookback    = 30;     // bars to count MA crosses
-input int    InpF3_MaxCrossDensity         = 5;      // > this many crosses in lookback → F3 off (sideway)
+const bool   InpF3_UseRecovery             = false;
+const bool   InpF3_OnlyF0Blocks            = true;
+const bool   InpF3_BlockOnF2               = true;   // never recover F2 (cross distance) blocks
+const int    InpF3_RecoveryBars            = 8;
+const double InpF3_BreakBufferATR          = 0.10;
+const ENUM_EXIT_TRIGGER InpF3_Trigger      = EXIT_ON_CANDLE_CLOSE;
+const bool   InpF3_RequireMAAligned        = true;
+const bool   InpF3_RequireDIDirection      = true;
+const bool   InpF3_EnterAsSoft             = true;
+const bool   InpF3_BlockChoppyRange        = true;   // block recovery in ranging/choppy regimes
+const double InpF3_MaxChoppyAND            = 0.65;   // stddev/ATR ceiling for F3 recovery
+const int    InpF3_CooldownBars            = 20;     // block F3 N bars after a losing F3 trade
+const bool   InpF3_BlockWickSweep          = true;   // skip F3 if last bar is a wick sweep against dir
+const int    InpF3_CrossDensityLookback    = 30;     // bars to count MA crosses
+const int    InpF3_MaxCrossDensity         = 5;      // > this many crosses in lookback → F3 off (sideway)
 // Recovery point must be geometrically close to the original cross.
-input double InpF3_MaxDistATR              = 1.5;    // |recovery_px - cross_px| max in ATR
+const double InpF3_MaxDistATR              = 1.5;    // |recovery_px - cross_px| max in ATR
 // Refire window. Skip cooldown when the original setup is still intact.
-input bool   InpF3_AllowRefire             = true;
-input int    InpF3_RefireMaxBars           = 10;     // re-arm within this many bars of first fire
-input double InpF3_RefireMaxDistATR        = 1.5;    // and price still within this many ATR of cross
+const bool   InpF3_AllowRefire             = true;
+const int    InpF3_RefireMaxBars           = 10;     // re-arm within this many bars of first fire
+const double InpF3_RefireMaxDistATR        = 1.5;    // and price still within this many ATR of cross
 
-input group "=== F4: Slow MA Direction (was F14 pre-v13.10.0) ==="
-input ENUM_FILTER_ACTION InpF4_Action       = F_SOFT;
-input int                InpF4_LookbackBars = 4;
-input double             InpF4_MinSlopePts  = 0.6;  // 0 = any direction; >0 = min slope pts/bar
+// input group "=== F4: Slow MA Direction (was F14 pre-v13.10.0) ==="
+const ENUM_FILTER_ACTION InpF4_Action       = F_SOFT;
+const int                InpF4_LookbackBars = 4;
+const double             InpF4_MinSlopePts  = 0.6;  // 0 = any direction; >0 = min slope pts/bar
 
-input group "=== F5: RVI Overbought/Oversold (was F15 pre-v13.10.0) ==="
-input ENUM_FILTER_ACTION InpF5_Action          = F_SOFT;
-input ENUM_TIMEFRAMES    InpF5_TF              = PERIOD_CURRENT;
-input int                InpF5_Period          = 12;
-input double             InpF5_OBLevel         = 0.72;   // BUY blocked when RVI > this
-input double             InpF5_OSLevel         = -0.72;  // SELL blocked when RVI < this
-input bool               InpF5_UseSignalLine   = true;  // also require RVI vs SignalLine cross
+// input group "=== F5: RVI Overbought/Oversold (was F15 pre-v13.10.0) ==="
+const ENUM_FILTER_ACTION InpF5_Action          = F_SOFT;
+const ENUM_TIMEFRAMES    InpF5_TF              = PERIOD_CURRENT;
+const int                InpF5_Period          = 12;
+const double             InpF5_OBLevel         = 0.72;   // BUY blocked when RVI > this
+const double             InpF5_OSLevel         = -0.72;  // SELL blocked when RVI < this
+const bool               InpF5_UseSignalLine   = true;  // also require RVI vs SignalLine cross
 
-input group "=== Intelligent Filter (v13.9.16) ==="
+// input group "=== Intelligent Filter (v13.9.16) ==="
 // Self-contained EMA20/EMA50 short-trend gate. No dashboard row, no labels,
 // no visual artifacts. Works behind the scenes between signal detect and
 // pipeline execution.
@@ -1099,9 +135,9 @@ input group "=== Intelligent Filter (v13.9.16) ==="
 //     signal is blocked.
 // TF = PERIOD_CURRENT reads EMAs/RVI/Stoch on whatever timeframe the chart
 // is showing (useful for one-EA-many-charts setups).
-input bool            InpIF_Enable        = true;
-input ENUM_TIMEFRAMES InpIF_TF            = PERIOD_CURRENT;
-input bool            InpIF_UseExhaustion = true;
+const bool            InpIF_Enable        = true;
+const ENUM_TIMEFRAMES InpIF_TF            = PERIOD_CURRENT;
+const bool            InpIF_UseExhaustion = true;
 
 input group "=== Wick / Liquidity Sweep Detector (v13.9.0) ==="
 // Used by Judge candle component and F11 break-candle guard. Distinguishes:
@@ -1114,66 +150,66 @@ input int    InpWick_SweepLookback          = 10;    // bars to scan for prev hi
 input double InpWick_MinWickRatio           = 0.60;  // wick/range ratio to count as dominant
 input int    InpWick_ConfirmBars            = 1;     // post-sweep confirm bars (reserved)
 
-input group "=== Market Regime Detector (v13.10.0, issue #11) ==="
+// input group "=== Market Regime Detector (v13.10.0, issue #11) ==="
 // Classifies the current bar into one of five regimes and gates entries.
 // Built on ATR fast/slow + Efficiency Ratio + EMA20/50 + ADX/DI.
-input bool   InpRegime_Enable         = true;
+const bool   InpRegime_Enable         = true;
 // --- ATR setup (in addition to base ATR(14)) ---
-input int    InpRegime_ATRFastPeriod  = 5;       // ATR fast = recent volatility
-input int    InpRegime_ATRSlowPeriod  = 20;      // ATR slow = stable baseline
+const int    InpRegime_ATRFastPeriod  = 5;       // ATR fast = recent volatility
+const int    InpRegime_ATRSlowPeriod  = 20;      // ATR slow = stable baseline
 // --- Efficiency Ratio ---
-input int    InpRegime_ER_Period      = 12;      // N for ER calc (M1=14, M5=10..14)
-input double InpRegime_ER_ChoppyMax   = 0.18;    // ER < this → choppy (fallback also)
-input double InpRegime_ER_NeutralMax  = 0.33;    // ER < this → ranging fallback
-input double InpRegime_ER_DirectionalMin = 0.33; // ER ≥ this → DIRECTIONAL fallback
-input double InpRegime_ER_StrongDirMin   = 0.52; // ER ≥ this → STRONG_DIRECTIONAL fallback
+const int    InpRegime_ER_Period      = 12;      // N for ER calc (M1=14, M5=10..14)
+const double InpRegime_ER_ChoppyMax   = 0.18;    // ER < this → choppy (fallback also)
+const double InpRegime_ER_NeutralMax  = 0.33;    // ER < this → ranging fallback
+const double InpRegime_ER_DirectionalMin = 0.33; // ER ≥ this → DIRECTIONAL fallback
+const double InpRegime_ER_StrongDirMin   = 0.52; // ER ≥ this → STRONG_DIRECTIONAL fallback
 // v13.11.2 — slope guard for fallback bucket. When ER is in [ChoppyMax,
 // DirectionalMin) but EMA50 has clearly directional slope over the past N
 // bars, upgrade RANGING WEAK_ER → DIRECTIONAL (so pullback bars inside a
 // strong trend don't get blocked when their local ER dips).
-input int    InpRegime_FallbackSlopeBars   = 10;   // bars back for EMA50 slope check
-input double InpRegime_FallbackSlopeATRMult= 0.30; // EMA50 delta ≥ this × ATR ⇒ directional
+const int    InpRegime_FallbackSlopeBars   = 10;   // bars back for EMA50 slope check
+const double InpRegime_FallbackSlopeATRMult= 0.30; // EMA50 delta ≥ this × ATR ⇒ directional
 // --- EMA20/EMA50 (reused from IF when IF is also on) ---
-input int    InpRegime_EMA_Fast       = 20;
-input int    InpRegime_EMA_Slow       = 50;
+const int    InpRegime_EMA_Fast       = 20;
+const int    InpRegime_EMA_Slow       = 50;
 // --- Choppy regime detection ---
-input bool   InpRegime_DetectChoppy   = true;
-input int    InpRegime_ChoppyLookback = 24;      // bars for range / cross-count
-input double InpRegime_ChoppyRangeATRMult = 1.5; // range < 1.5*ATR(14) for choppy
-input double InpRegime_ChoppyMAGapATRMult = 0.25;// |EMA20-EMA50| < 0.25*ATR(14)
-input int    InpRegime_ChoppyMinCrosses   = 3;   // min EMA8/LWMA20 crosses in lookback
+const bool   InpRegime_DetectChoppy   = true;
+const int    InpRegime_ChoppyLookback = 24;      // bars for range / cross-count
+const double InpRegime_ChoppyRangeATRMult = 1.5; // range < 1.5*ATR(14) for choppy
+const double InpRegime_ChoppyMAGapATRMult = 0.25;// |EMA20-EMA50| < 0.25*ATR(14)
+const int    InpRegime_ChoppyMinCrosses   = 3;   // min EMA8/LWMA20 crosses in lookback
 // --- Ranging regime detection ---
-input bool   InpRegime_DetectRanging  = true;
-input int    InpRegime_RangingLookback = 24;
-input double InpRegime_RangingSizeATRMult = 1.5; // RangeSize >= 1.5*ATR(14)
-input double InpRegime_RangingMidLo  = 0.40;     // block when PricePos in [Lo,Hi]
-input double InpRegime_RangingMidHi  = 0.60;
-input double InpRegime_RangingER_Max = 0.35;
+const bool   InpRegime_DetectRanging  = true;
+const int    InpRegime_RangingLookback = 24;
+const double InpRegime_RangingSizeATRMult = 1.5; // RangeSize >= 1.5*ATR(14)
+const double InpRegime_RangingMidLo  = 0.40;     // block when PricePos in [Lo,Hi]
+const double InpRegime_RangingMidHi  = 0.60;
+const double InpRegime_RangingER_Max = 0.35;
 // --- Long Ranging detection (extended consolidation) ---
-input bool   InpRegime_DetectLongRanging  = true;
-input int    InpRegime_LongRangeLookbackM1 = 80;
-input int    InpRegime_LongRangeLookbackM5 = 48;
-input double InpRegime_LongRangeEMA50FlatATRMult = 0.20; // |EMA50[0]-EMA50[10]| < 0.20*ATR
-input double InpRegime_LongRangeAvgERMax = 0.30;          // mean of last 3 ER samples
-input double InpRegime_LongRangeBreakoutBufATRMult = 0.20;
+const bool   InpRegime_DetectLongRanging  = true;
+const int    InpRegime_LongRangeLookbackM1 = 80;
+const int    InpRegime_LongRangeLookbackM5 = 48;
+const double InpRegime_LongRangeEMA50FlatATRMult = 0.20; // |EMA50[0]-EMA50[10]| < 0.20*ATR
+const double InpRegime_LongRangeAvgERMax = 0.30;          // mean of last 3 ER samples
+const double InpRegime_LongRangeBreakoutBufATRMult = 0.20;
 // --- Early Breakout detection ---
-input bool   InpRegime_DetectEarlyBreakout = true;
-input double InpRegime_EarlyBreakoutADXMax = 22.0;
-input int    InpRegime_EarlyBreakoutADXSlopeBars = 3;
-input double InpRegime_EarlyBreakoutER_Min = 0.30;
-input double InpRegime_EarlyBreakoutATRFastRatio = 1.10;  // ATR(5) >= 1.10 * ATR(20)
-input int    InpRegime_EarlyBreakoutRangeBars = 20;
-input double InpRegime_EarlyBreakoutBufATRMult = 0.10;
-input double InpRegime_EarlyBreakoutMinBodyRatio = 0.50;
-input double InpRegime_EarlyBreakoutMaxWickBodyMult = 1.5;
-input double InpRegime_EarlyBreakoutLotMult = 0.5;        // 0.5x lot when in early breakout
+const bool   InpRegime_DetectEarlyBreakout = true;
+const double InpRegime_EarlyBreakoutADXMax = 22.0;
+const int    InpRegime_EarlyBreakoutADXSlopeBars = 3;
+const double InpRegime_EarlyBreakoutER_Min = 0.30;
+const double InpRegime_EarlyBreakoutATRFastRatio = 1.10;  // ATR(5) >= 1.10 * ATR(20)
+const int    InpRegime_EarlyBreakoutRangeBars = 20;
+const double InpRegime_EarlyBreakoutBufATRMult = 0.10;
+const double InpRegime_EarlyBreakoutMinBodyRatio = 0.50;
+const double InpRegime_EarlyBreakoutMaxWickBodyMult = 1.5;
+const double InpRegime_EarlyBreakoutLotMult = 0.5;        // 0.5x lot when in early breakout
 // --- Confirmed Trend detection ---
-input bool   InpRegime_DetectConfirmedTrend = true;
-input int    InpRegime_ConfirmedSlowSlopeBars = 5;
-input int    InpRegime_ConfirmedFastSlopeBars = 3;
-input double InpRegime_ConfirmedMAGapATRMult  = 0.25;     // |EMA20-EMA50| > 0.25*ATR
-input double InpRegime_ConfirmedADXMin = 22.0;
-input double InpRegime_ConfirmedER_Min = 0.35;
+const bool   InpRegime_DetectConfirmedTrend = true;
+const int    InpRegime_ConfirmedSlowSlopeBars = 5;
+const int    InpRegime_ConfirmedFastSlopeBars = 3;
+const double InpRegime_ConfirmedMAGapATRMult  = 0.25;     // |EMA20-EMA50| > 0.25*ATR
+const double InpRegime_ConfirmedADXMin = 22.0;
+const double InpRegime_ConfirmedER_Min = 0.35;
 
 input group "=== Soft Mode TP/SL (when filter = SOFT) ==="
 input double InpSoft_TP1_Mult   = 0.4;
@@ -1557,7 +593,7 @@ bool LIC_VerifyOnce(){
     }
     string url = InpLicense_URL + "/backend/api/license/verify.php";
     long account = AccountInfoInteger(ACCOUNT_LOGIN);
-    string body = StringFormat("{\"account_number\":\"%I64u\",\"ea_version\":\"13.11.8\"}", (ulong)account);
+    string body = StringFormat("{\"account_number\":\"%I64u\",\"ea_version\":\"13.11.12\"}", (ulong)account);
     char post[]; StringToCharArray(body, post, 0, StringLen(body));
     char result[]; string headers="Content-Type: application/json\r\n"; string resp_headers;
     int timeout = 5000;
@@ -2040,7 +1076,7 @@ int OnInit(){
     ChartSetInteger(0,CHART_SHOW_GRID,false);ChartSetInteger(0,CHART_MODE,CHART_CANDLES);
 
     Print("==============================================================");
-    Print("[INIT] Dachi Trader v13.11.8 | ",_Symbol," ",EnumToString(_Period),
+    Print("[INIT] Dachi Trader v13.11.12 | ",_Symbol," ",EnumToString(_Period),
           " | Mode=",(InpIndicatorOnly?"INDICATOR":"EA ACTIVE"));
     string slmm=(InpSlowMA_Method==MODE_EMA?"EMA":InpSlowMA_Method==MODE_SMMA?"SMMA":InpSlowMA_Method==MODE_LWMA?"LWMA":"SMA");
     Print("[INIT] Core: EMA",InpEMA_Fast,"/",slmm,InpSMA_Slow," | ATR",InpATR_Period);
@@ -2095,7 +1131,7 @@ void OnDeinit(const int reason){
     if(h_regime_ema_fast!=INVALID_HANDLE)IndicatorRelease(h_regime_ema_fast);
     if(h_regime_ema_slow!=INVALID_HANDLE)IndicatorRelease(h_regime_ema_slow);
     LIC_ClearOverlay();
-    Print("[DEINIT] Dachi v13.11.8 removed");
+    Print("[DEINIT] Dachi v13.11.12 removed");
 }
 
 void OnTimer(){
@@ -2199,6 +1235,14 @@ uint ComputeFilterHash(){
     h = (h ^ (uint)(int)(InpF1_Margin*100))      * 16777619;
     // F2 cross distance (was F9)
     h = (h ^ (uint)(int)(InpF2_MaxDistATR*100))  * 16777619;
+    // Clean-core HTF and phase-1 knobs
+    h = (h ^ (uint)(InpUseH1Bias?1:0))           * 16777619;
+    h = (h ^ (uint)(InpAllowNeutralBias?1:0))    * 16777619;
+    h = (h ^ (uint)(InpUseM15Setup?1:0))         * 16777619;
+    h = (h ^ (uint)(InpAllowM15Neutral?1:0))     * 16777619;
+    h = (h ^ (uint)(InpHTF_AllowReversalOverride?1:0)) * 16777619;
+    h = (h ^ (uint)(int)(InpHTF_ReversalBodyATRMin*100)) * 16777619;
+    h = (h ^ (uint)(int)(InpSideway_MinEMASlopePts*100)) * 16777619;
     // F4 slow MA direction (was F14)
     h = (h ^ (uint)InpF4_LookbackBars)           * 16777619;
     h = (h ^ (uint)(int)(InpF4_MinSlopePts*100)) * 16777619;
@@ -2222,7 +1266,7 @@ uint ComputeFilterHash(){
     // v13.11.2 — fallback slope guard inputs
     h = (h ^ (uint)InpRegime_FallbackSlopeBars)              * 16777619;
     h = (h ^ (uint)(int)(InpRegime_FallbackSlopeATRMult*100))* 16777619;
-    h = (h ^ (uint)0x13C00080)             * 16777619;   // logic version marker
+    h = (h ^ (uint)0x13C00120)             * 16777619;   // logic version marker
     return h;
 }
 
@@ -3110,18 +2154,37 @@ int GetHTFDirection(ENUM_TIMEFRAMES tf, int idx){
     return 0;
 }
 
+bool IsReversalOverride(int sig, int idx){
+    if(!InpHTF_AllowReversalOverride) return false;
+    double o=iOpen(_Symbol,_Period,idx), c=iClose(_Symbol,_Period,idx), h=iHigh(_Symbol,_Period,idx), l=iLow(_Symbol,_Period,idx);
+    double atr[1]; if(CopyBuffer(h_atr,0,idx,1,atr)<=0 || atr[0]<=0) return false;
+    double body=MathAbs(c-o), range=MathMax(_Point,h-l);
+    bool strong_body = (body/atr[0] >= InpHTF_ReversalBodyATRMin);
+    bool strong_close = (sig==1)?(c > (l + 0.65*range)):(c < (h - 0.65*range));
+    return strong_body && strong_close;
+}
+
+bool SidewayBlocks(int sig, int idx){
+    double e0[1], e4[1];
+    if(CopyBuffer(h_ema_fast,0,idx,1,e0)<=0 || CopyBuffer(h_ema_fast,0,idx+4,1,e4)<=0) return false;
+    double slope_pts = MathAbs((e0[0]-e4[0])/_Point)/4.0;
+    return slope_pts < InpSideway_MinEMASlopePts;
+}
+
 bool HTFContextBlocks(int sig, int idx){
+    bool blocked=false;
     if(InpUseH1Bias){
         int h1 = GetHTFDirection(PERIOD_H1, idx);
-        if(h1==0 && !InpAllowNeutralBias) return true;
-        if(h1!=0 && sig!=h1) return true;
+        if(h1==0 && !InpAllowNeutralBias) blocked=true;
+        if(h1!=0 && sig!=h1) blocked=true;
     }
     if(InpUseM15Setup){
         int m15 = GetHTFDirection(PERIOD_M15, idx);
-        if(m15==0 && !InpAllowM15Neutral) return true;
-        if(m15!=0 && sig!=m15) return true;
+        if(m15==0 && !InpAllowM15Neutral) blocked=true;
+        if(m15!=0 && sig!=m15) blocked=true;
     }
-    return false;
+    if(blocked && IsReversalOverride(sig, idx)) return false;
+    return blocked;
 }
 
 // === PIPELINE (v13.10.0 simplified — no scoring, no judge) ===
@@ -3143,7 +2206,8 @@ bool EvaluatePipeline(int sig){
     }
 
     bool h_htf = HTFContextBlocks(sig, 1);
-    g_pipe_filter_hard = h_f2 || h_htf;
+    bool h_sideway = SidewayBlocks(sig, 1);
+    g_pipe_filter_hard = h_f2 || h_htf || h_sideway;
     g_pipe_soft = false;
     g_pipe_hard = g_pipe_filter_hard;
     return !g_pipe_hard;
@@ -3155,6 +2219,7 @@ bool EvaluatePipelineAt(int idx, int sig, bool &out_hard, bool &out_soft){
     out_hard=false; out_soft=false;
     if(InpF2_Action!=F_OFF && EvalF2At(idx)) out_hard=true;
     if(HTFContextBlocks(sig, idx)) out_hard=true;
+    if(SidewayBlocks(sig, idx)) out_hard=true;
     return !out_hard;
 }
 
@@ -4409,7 +3474,7 @@ void DrawDashboard(bool force){
 
     DrawFilterRow("F2",row++,"F2 CrossDist",InpF2_Action,g_f2_trig,g_f2_trig?"FAR":"OK",yb);
 
-    string htfv = StringFormat("H1=%s M15=%s", InpUseH1Bias?"ON":"OFF", InpUseM15Setup?"ON":"OFF");
+    string htfv = StringFormat("H1=%s M15=%s RevOVR=%s", InpUseH1Bias?"ON":"OFF", InpUseM15Setup?"ON":"OFF", InpHTF_AllowReversalOverride?"ON":"OFF");
     DrawDR("HTF",row++,"HTF Gate", htf_block?"BLOCK":"PASS", htf_block?DB_CLR_RED:DB_CLR_GREEN, yb);
     DrawDR("HTFC",row++,"HTF Config", htfv, DB_CLR_CYAN, yb);
 
@@ -4536,6 +3601,15 @@ void OnTick(){
             // Capture EMA-fast vs slow gap AT THE SIGNAL BAR (not live).
             // F0 evaluates against this number, dashboard displays this number.
             g_last_signal_gap_pts=MathAbs(g_ema_fast-g_sma_slow)/_Point;
+
+            // Indicator-only mode has no real server position, so reverse
+            // signals must reset virtual runtime direction to avoid stale
+            // SELL/BUY state sticking on dashboard/TP-SL visuals.
+            if(InpIndicatorOnly && g_last_signal!=0 && sig!=g_last_signal){
+                DrawSignalLabel(sig,st,sp,SC_REVERSAL);
+                ColorSignalCandle(sig,st);
+                ResetRuntimeTradeState(true);
+            }
 
             // Close opposite position using server truth
             int cur_pos_dir=GetActivePositionDir();
