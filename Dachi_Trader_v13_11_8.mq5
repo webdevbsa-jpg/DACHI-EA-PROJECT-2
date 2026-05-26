@@ -1,6 +1,6 @@
 // =============================================================================
-// Dachi_Trader_v13_11_7.mq5 — Expert Advisor
-// Version: 13.11.7
+// Dachi_Trader_v13_11_8.mq5 — Expert Advisor
+// Version: 13.11.8
 //
 // Versioning rule (X.Y.Z): every edit bumps a segment AND renames the file.
 //   X = major architectural change (e.g. v12 → v13).
@@ -31,7 +31,7 @@
 //              slope), InpRegime_FallbackSlopeATRMult=0.30 (delta vs ATR
 //              threshold). 0.30×ATR over 10 bars catches even modest
 //              trend slopes while excluding flat ranging.
-//   [HASH]     Logic-version marker (uint)0x13C00010 → (uint)0x13C00070.
+//   [HASH]     Logic-version marker (uint)0x13C00010 → (uint)0x13C00080.
 //              .set files from v13.11.1 trigger rescan because some bars
 //              that labeled BLOCKED in v13.11.1 will relabel VALID in
 //              v13.11.2 (pullback inside trend = DIR_BY_SLOPE).
@@ -970,8 +970,8 @@
 // =============================================================================
 
 #property copyright   "Daniel @danieljulyanto"
-#property version     "13.11.7"
-#property description "Dachi Trader v13.11.7 — Expert Advisor"
+#property version     "13.11.8"
+#property description "Dachi Trader v13.11.8 — Expert Advisor"
 
 #define MAX_TP            30
 #define VOL_AVG_PERIOD    20
@@ -1022,6 +1022,12 @@ input int    InpEMA_Fast        = 8;
 input int    InpSMA_Slow        = 20;
 input ENUM_MA_METHOD InpSlowMA_Method = MODE_LWMA;  // Slow MA method: SMA/EMA/SMMA/LWMA (v13.9.2: LWMA20 baseline)
 input int    InpATR_Period      = 14;
+
+input group "=== Clean Core HTF Context (H1 Bias + M15 Setup) ==="
+input bool   InpUseH1Bias         = true;
+input bool   InpAllowNeutralBias  = false;
+input bool   InpUseM15Setup       = true;
+input bool   InpAllowM15Neutral   = false;
 
 input group "=== F0: EMA Gap Filter ==="
 input ENUM_FILTER_ACTION InpGap_Action  = F_SOFT;
@@ -1551,7 +1557,7 @@ bool LIC_VerifyOnce(){
     }
     string url = InpLicense_URL + "/backend/api/license/verify.php";
     long account = AccountInfoInteger(ACCOUNT_LOGIN);
-    string body = StringFormat("{\"account_number\":\"%I64u\",\"ea_version\":\"13.11.7\"}", (ulong)account);
+    string body = StringFormat("{\"account_number\":\"%I64u\",\"ea_version\":\"13.11.8\"}", (ulong)account);
     char post[]; StringToCharArray(body, post, 0, StringLen(body));
     char result[]; string headers="Content-Type: application/json\r\n"; string resp_headers;
     int timeout = 5000;
@@ -2034,7 +2040,7 @@ int OnInit(){
     ChartSetInteger(0,CHART_SHOW_GRID,false);ChartSetInteger(0,CHART_MODE,CHART_CANDLES);
 
     Print("==============================================================");
-    Print("[INIT] Dachi Trader v13.11.7 | ",_Symbol," ",EnumToString(_Period),
+    Print("[INIT] Dachi Trader v13.11.8 | ",_Symbol," ",EnumToString(_Period),
           " | Mode=",(InpIndicatorOnly?"INDICATOR":"EA ACTIVE"));
     string slmm=(InpSlowMA_Method==MODE_EMA?"EMA":InpSlowMA_Method==MODE_SMMA?"SMMA":InpSlowMA_Method==MODE_LWMA?"LWMA":"SMA");
     Print("[INIT] Core: EMA",InpEMA_Fast,"/",slmm,InpSMA_Slow," | ATR",InpATR_Period);
@@ -2089,7 +2095,7 @@ void OnDeinit(const int reason){
     if(h_regime_ema_fast!=INVALID_HANDLE)IndicatorRelease(h_regime_ema_fast);
     if(h_regime_ema_slow!=INVALID_HANDLE)IndicatorRelease(h_regime_ema_slow);
     LIC_ClearOverlay();
-    Print("[DEINIT] Dachi v13.11.7 removed");
+    Print("[DEINIT] Dachi v13.11.8 removed");
 }
 
 void OnTimer(){
@@ -2216,7 +2222,7 @@ uint ComputeFilterHash(){
     // v13.11.2 — fallback slope guard inputs
     h = (h ^ (uint)InpRegime_FallbackSlopeBars)              * 16777619;
     h = (h ^ (uint)(int)(InpRegime_FallbackSlopeATRMult*100))* 16777619;
-    h = (h ^ (uint)0x13C00070)             * 16777619;   // logic version marker
+    h = (h ^ (uint)0x13C00080)             * 16777619;   // logic version marker
     return h;
 }
 
@@ -3084,6 +3090,40 @@ void ProcessF3Recovery(bool new_bar){
     g_f3_armed=false;g_f3_dir=0;g_f3_counter=0;g_f3_reason="FIRED";
 }
 
+int GetHTFDirection(ENUM_TIMEFRAMES tf, int idx){
+    double c = iClose(_Symbol, tf, idx);
+    int h20 = iMA(_Symbol, tf, 20, 0, MODE_EMA, PRICE_CLOSE);
+    int h50 = iMA(_Symbol, tf, 50, 0, MODE_EMA, PRICE_CLOSE);
+    if(c==0 || h20==INVALID_HANDLE || h50==INVALID_HANDLE) return 0;
+
+    double b20[1], b50[1], b50_prev[1];
+    if(CopyBuffer(h20, 0, idx,   1, b20)      <= 0) return 0;
+    if(CopyBuffer(h50, 0, idx,   1, b50)      <= 0) return 0;
+    if(CopyBuffer(h50, 0, idx+3, 1, b50_prev) <= 0) return 0;
+
+    double e20 = b20[0];
+    double e50 = b50[0];
+    double slope = e50 - b50_prev[0];
+
+    if(c>e50 && e20>e50 && slope>=0) return 1;
+    if(c<e50 && e20<e50 && slope<=0) return -1;
+    return 0;
+}
+
+bool HTFContextBlocks(int sig, int idx){
+    if(InpUseH1Bias){
+        int h1 = GetHTFDirection(PERIOD_H1, idx);
+        if(h1==0 && !InpAllowNeutralBias) return true;
+        if(h1!=0 && sig!=h1) return true;
+    }
+    if(InpUseM15Setup){
+        int m15 = GetHTFDirection(PERIOD_M15, idx);
+        if(m15==0 && !InpAllowM15Neutral) return true;
+        if(m15!=0 && sig!=m15) return true;
+    }
+    return false;
+}
+
 // === PIPELINE (v13.10.0 simplified — no scoring, no judge) ===
 // Returns true if signal should proceed (not blocked).
 // v13.11.7 behavior: each filter keeps ON/OFF runtime, with class-based effect: SOFT=>LIMITED, HARD=>BLOCKED when ON and triggered.
@@ -3096,61 +3136,16 @@ bool EvaluatePipeline(int sig){
     g_f4_trig=false;g_f5_trig=false;
     g_regime_lot_scale=1.0;
 
-    bool h_f0=false, h_f1=false, h_f2=false, h_f4=false, h_f5=false;
-    bool s_f0=false, s_f1=false, s_f2=false, s_f4=false, s_f5=false;
-
-    // F0 EMA gap
-    if(InpGap_Action!=F_OFF){
-        g_f0_trig=EvalF0();
-        if(g_f0_trig){
-            if(InpGap_Action==F_HARD) h_f0=true;
-            if(InpGap_Action==F_SOFT) s_f0=true;
-        }
-    }
-    // F1 DI±
-    if(InpF1_Action!=F_OFF){
-        g_f1_trig=EvalF1(sig);
-        if(g_f1_trig){
-            if(InpF1_Action==F_HARD) h_f1=true;
-            if(InpF1_Action==F_SOFT) s_f1=true;
-        }
-    }
-    // F2 Crossing distance
+    bool h_f2=false;
     if(InpF2_Action!=F_OFF){
         g_f2_trig=EvalF2();
-        if(g_f2_trig){
-            if(InpF2_Action==F_HARD) h_f2=true;
-            if(InpF2_Action==F_SOFT) s_f2=true;
-        }
-    }
-    // F4 Slow MA direction
-    if(InpF4_Action!=F_OFF){
-        g_f4_trig=EvalF4(sig);
-        if(g_f4_trig){
-            if(InpF4_Action==F_HARD) h_f4=true;
-            if(InpF4_Action==F_SOFT) s_f4=true;
-        }
-    }
-    // F5 RVI OB/OS
-    if(InpF5_Action!=F_OFF){
-        g_f5_trig=EvalF5(sig);
-        if(g_f5_trig){
-            if(InpF5_Action==F_HARD) h_f5=true;
-            if(InpF5_Action==F_SOFT) s_f5=true;
-        }
+        if(g_f2_trig) h_f2=true;
     }
 
-    // Intelligent Filter (HARD-only gate)
-    bool h_if = false;
-    if(InpIF_Enable) h_if = EvalIntelligentFilter(sig, 1);
-
-    // Market Regime gate (v13.10.0). Returns true to block; may set lot scale.
-    bool h_regime = false;
-    if(InpRegime_Enable) h_regime = MarketRegimeBlocks(sig);
-
-    g_pipe_filter_hard = h_f0||h_f1||h_f2||h_f4||h_f5||h_if;
-    g_pipe_soft = s_f0||s_f1||s_f2||s_f4||s_f5;
-    g_pipe_hard = g_pipe_filter_hard || h_regime;
+    bool h_htf = HTFContextBlocks(sig, 1);
+    g_pipe_filter_hard = h_f2 || h_htf;
+    g_pipe_soft = false;
+    g_pipe_hard = g_pipe_filter_hard;
     return !g_pipe_hard;
 }
 
@@ -3158,58 +3153,8 @@ bool EvaluatePipeline(int sig){
 // v13.10.0 simplified — no scoring/judge; each F_HARD filter independently blocks.
 bool EvaluatePipelineAt(int idx, int sig, bool &out_hard, bool &out_soft){
     out_hard=false; out_soft=false;
-
-    bool t_f0=false, t_f1=false, t_f2=false, t_f4=false, t_f5=false;
-
-    // F0 EMA Gap — measure at the SIGNAL bar (idx).
-    if(InpGap_Action!=F_OFF){
-        double ef0[1],es0[1];
-        if(CopyBuffer(h_ema_fast,0,idx,1,ef0)>0&&CopyBuffer(h_sma_slow,0,idx,1,es0)>0){
-            double gap_pts_h=MathAbs(ef0[0]-es0[0])/_Point;
-            double threshold_h;
-            if(InpGap_UseATRPct && g_atr_val>0)
-                threshold_h=(g_atr_val/_Point)*InpGap_ATRPct/100.0;
-            else
-                threshold_h=(double)InpGapPoints;
-            t_f0=(gap_pts_h<threshold_h);
-        }
-    }
-    // F1 DI± historical
-    if(InpF1_Action!=F_OFF&&h_adx!=INVALID_HANDLE){
-        double dp[1],dm[1];
-        if(CopyBuffer(h_adx,1,idx,1,dp)>0&&CopyBuffer(h_adx,2,idx,1,dm)>0){
-            t_f1=(sig==1)?(dm[0]>dp[0]+InpF1_Margin):(dp[0]>dm[0]+InpF1_Margin);
-        }
-    }
-    // F2 cross-distance historical
-    if(InpF2_Action!=F_OFF) t_f2=EvalF2At(idx);
-    // F4 slow-MA direction historical
-    if(InpF4_Action!=F_OFF && h_sma_slow!=INVALID_HANDLE){
-        int look = MathMax(1, InpF4_LookbackBars);
-        double sn[1], sb[1];
-        if(CopyBuffer(h_sma_slow,0,idx,1,sn)>0 && CopyBuffer(h_sma_slow,0,idx+look,1,sb)>0){
-            double slope_pts = (sn[0]-sb[0])/_Point/(double)look;
-            double min_slope = MathMax(0.0, InpF4_MinSlopePts);
-            if(sig== 1) t_f4=(slope_pts <  +min_slope);
-            if(sig==-1) t_f4=(slope_pts >  -min_slope);
-        }
-    }
-    // F5 RVI OB/OS historical
-    if(InpF5_Action!=F_OFF) t_f5 = EvalF5At(sig, idx);
-
-    // Intelligent Filter historical mirror
-    bool t_if = false;
-    if(InpIF_Enable) t_if = EvalIntelligentFilter(sig, idx);
-
-    // Aggregate (ON/OFF runtime): ON+triggered => LIMITED for SOFT class, BLOCKED for HARD class.
-    if(t_f0){ if(InpGap_Action==F_HARD) out_hard=true; else if(InpGap_Action==F_SOFT) out_soft=true; }
-    if(t_f1){ if(InpF1_Action==F_HARD) out_hard=true; else if(InpF1_Action==F_SOFT) out_soft=true; }
-    if(t_f2){ if(InpF2_Action==F_HARD) out_hard=true; else if(InpF2_Action==F_SOFT) out_soft=true; }
-    if(t_f4){ if(InpF4_Action==F_HARD) out_hard=true; else if(InpF4_Action==F_SOFT) out_soft=true; }
-    if(t_f5){ if(InpF5_Action==F_HARD) out_hard=true; else if(InpF5_Action==F_SOFT) out_soft=true; }
-    if(t_if) out_hard=true;
-    // Note: regime gate is live-only (uses live ATR/EMA state). Historical scan
-    // does not re-evaluate regime — the chart label reflects filter-stack outcome.
+    if(InpF2_Action!=F_OFF && EvalF2At(idx)) out_hard=true;
+    if(HTFContextBlocks(sig, idx)) out_hard=true;
     return !out_hard;
 }
 
@@ -4283,7 +4228,7 @@ void DrawF3RecoveryTPSL(int dir, datetime rt, double rp, double atr){
 void ScanHistory(){
     int total=Bars(_Symbol,_Period),scan=MathMin(total-InpSMA_Slow-5,4000);
     if(scan<3)return;Print("[SCAN] ",scan," bars...");
-    int sc=0,sc_soft=0,sc_blocked=0;
+    int sc=0,sc_blocked=0;
     int last_dir=0; double last_entry=0, last_atr=0; bool last_tight=false;
     ENUM_SIGNAL_CLASS last_cls=SC_BLOCKED;
     bool has_last=false;
@@ -4305,16 +4250,9 @@ void ScanHistory(){
         // v13.11.0 — combine filter class with regime class (harshest wins).
         // ComputeRegimeAt(i, ...) evaluates regime at the historical bar so
         // the label history matches what would have been live at that bar.
-        ENUM_SIGNAL_CLASS filter_cls = hard ? SC_BLOCKED : (soft ? SC_SOFT : SC_VALID);
-        ENUM_SIGNAL_CLASS regime_cls = SC_VALID;
-        if(InpRegime_Enable){
-            RegimeState rs;
-            ComputeRegimeAt(i, rs);
-            regime_cls = RegimeLabelClass(rs.regime);
-        }
-        ENUM_SIGNAL_CLASS sc_class = CombineSignalClass(filter_cls, regime_cls);
+        ENUM_SIGNAL_CLASS filter_cls = hard ? SC_BLOCKED : SC_VALID;
+        ENUM_SIGNAL_CLASS sc_class = filter_cls;
         if(sc_class==SC_BLOCKED) sc_blocked++;
-        else if(sc_class==SC_SOFT) sc_soft++;
 
         DrawSignalLabel(sig,st,sp,sc_class);
         ColorSignalCandle(sig,st);
@@ -4340,7 +4278,7 @@ void ScanHistory(){
         // (RANGING/LONG_RANGING/EARLY_BR labels) keeps normal TP/SL per user
         // spec: "perlakuan tetap regime rules" — regime affects the label,
         // not the TP/SL multiplier.
-        last_tight=(filter_cls==SC_SOFT);
+        last_tight=false;
 
         // ScanHistory must never arm runtime trading state. It only prepares
         // optional visual TP/SL levels for the last non-blocked historical
@@ -4364,8 +4302,7 @@ void ScanHistory(){
         }
         g_atr_val=sv;
     }
-    Print("[SCAN] ",sc," crossovers | VALID=",(sc-sc_blocked-sc_soft),
-          " LIMITED=",sc_soft," BLOCKED=",sc_blocked);
+    Print("[SCAN] ",sc," crossovers | VALID=",(sc-sc_blocked)," BLOCKED=",sc_blocked);
 
     ResetRuntimeTradeState(true);
     if(has_last&&last_cls!=SC_BLOCKED){
@@ -4461,113 +4398,20 @@ void DrawDashboard(bool force){
     DrawDH("MA",row++,"EMA"+IntegerToString(InpEMA_Fast)+"/"+slow_tag+IntegerToString(InpSMA_Slow),
         g_ema_fast>g_sma_slow?"BULL":"BEAR",DB_CLR_BG_BLACK,g_ema_fast>g_sma_slow?DB_CLR_GREEN:DB_CLR_RED,yb);
 
-    // Filter summary row
-    int n_hard=0,n_soft=0;
-    if(InpGap_Action==F_HARD&&g_f0_trig)n_hard++;if(InpGap_Action==F_SOFT&&g_f0_trig)n_soft++;
-    if(InpF1_Action==F_HARD&&g_f1_trig)n_hard++;if(InpF1_Action==F_SOFT&&g_f1_trig)n_soft++;
-    if(InpF2_Action==F_HARD&&g_f2_trig)n_hard++;if(InpF2_Action==F_SOFT&&g_f2_trig)n_soft++;
-    if(InpF4_Action==F_HARD&&g_f4_trig)n_hard++;if(InpF4_Action==F_SOFT&&g_f4_trig)n_soft++;
-    if(InpF5_Action==F_HARD&&g_f5_trig)n_hard++;if(InpF5_Action==F_SOFT&&g_f5_trig)n_soft++;
-    string fsum_val=IntegerToString(n_hard)+"H/"+IntegerToString(n_soft)+"S "+g_last_decision;
-    color fsum_c=n_hard>0?DB_CLR_RED:n_soft>0?DB_CLR_YELLOW:DB_CLR_GREEN;
-
+    // Clean Core dashboard: only F2 + HTF context gate
+    int n_hard=0;
+    if(InpF2_Action!=F_OFF && g_f2_trig) n_hard++;
+    bool htf_block = HTFContextBlocks((g_last_signal==0?1:g_last_signal), 1);
+    if(htf_block) n_hard++;
+    string fsum_val=IntegerToString(n_hard)+"H "+g_last_decision;
+    color fsum_c=n_hard>0?DB_CLR_RED:DB_CLR_GREEN;
     DrawDR("FSUM",row++,"Filters",fsum_val,fsum_c,yb);
 
-    // F0 — show gap-at-last-signal vs the actual resolved threshold (v13.9.9
-    // fix). v13.9.21: operator is dynamic ("<" when triggered, ">=" otherwise)
-    // so the row reads as the actual comparison F0 made, not a fixed-format
-    // "gap<thr" that gets misread as "17 < 10".
-    double f0_threshold;
-    if(InpGap_UseATRPct && g_atr_val > 0)
-        f0_threshold = (g_atr_val/_Point) * InpGap_ATRPct / 100.0;
-    else
-        f0_threshold = (double)InpGapPoints;
-    string f0_op = g_f0_trig ? "<" : ">=";
-    string f0_val = DoubleToString(g_last_signal_gap_pts,0)+"pt"+f0_op+DoubleToString(f0_threshold,0);
-    if(InpGap_UseATRPct) f0_val += " ATR"+DoubleToString(InpGap_ATRPct,0)+"%";
-    DrawFilterRow("F0",row++,"F0 EMAGap",InpGap_Action,g_f0_trig,f0_val,yb);
-    // F1 DI+/DI- (was F7)
-    string f1s=StringFormat("DI+%.1f DI-%.1f",g_f1_dip,g_f1_dim);
-    DrawFilterRow("F1",row++,"F1 DI",InpF1_Action,g_f1_trig,f1s,yb);
-    // F2 Crossing Distance (was F9)
     DrawFilterRow("F2",row++,"F2 CrossDist",InpF2_Action,g_f2_trig,g_f2_trig?"FAR":"OK",yb);
-    // F3 Recovery (was F11) — include cooldown info when waiting
-    string f3s;
-    if(!InpF3_UseRecovery) f3s="OFF";
-    else if(g_f3_cooldown_bars>0) f3s=StringFormat("CD %db (%d/%d L)",g_f3_cooldown_bars,g_f3_loss_count,g_f3_fire_count);
-    else if(g_f3_armed) f3s=(g_f3_dir==1?"BUY ":"SELL ")+IntegerToString(g_f3_counter)+"b "+g_f3_reason;
-    else f3s="---";
-    color f3c=!InpF3_UseRecovery?DB_CLR_GRAY:(g_f3_cooldown_bars>0?DB_CLR_ORANGE:(g_f3_armed?DB_CLR_YELLOW:DB_CLR_GRAY));
-    DrawDR("F3",row++,"F3 Recovery",f3s,f3c,yb);
-    // F4 Slow MA Direction (was F14)
-    string f4s;
-    if(InpF4_Action==F_OFF){
-        f4s = "OFF";
-    } else {
-        string sign = g_f4_slope_pts>=0 ? "+" : "";
-        f4s = StringFormat("%s %db %s%.1fpt",
-                           g_f4_trig?"BLK":"OK",
-                           InpF4_LookbackBars,
-                           sign, g_f4_slope_pts);
-    }
-    DrawFilterRow("F4",row++,"F4 SlowDir",InpF4_Action,g_f4_trig,f4s,yb);
-    // F5 RVI Overbought/Oversold (was F15)
-    string f5s;
-    if(InpF5_Action==F_OFF){
-        f5s = "OFF";
-    } else {
-        f5s = StringFormat("%s %.2f %s",
-                           g_f5_trig?"BLK":"OK",
-                           g_f5_val,
-                           g_f5_reason);
-    }
-    DrawFilterRow("F5",row++,"F5 RVI",InpF5_Action,g_f5_trig,f5s,yb);
 
-    // Intelligent Filter dashboard row
-    string if_val;
-    color  if_c;
-    if(!InpIF_Enable){
-        if_val = "OFF";
-        if_c   = DB_CLR_GRAY;
-    } else {
-        if_val = g_if_trend + " " + g_if_state;
-        if(g_if_state=="ALIGN")          if_c = DB_CLR_GREEN;
-        else if(g_if_state=="EXH-OK")    if_c = DB_CLR_CYAN;
-        else if(g_if_block)              if_c = DB_CLR_RED;
-        else                              if_c = DB_CLR_YELLOW;
-    }
-    DrawDR("IFL",row++,"IntelliFltr",if_val,if_c,yb);
-
-    // v13.10.0 Market Regime row (issue #11)
-    string rg_val;
-    color  rg_c;
-    if(!InpRegime_Enable){
-        rg_val = "OFF";
-        rg_c   = DB_CLR_GRAY;
-    } else {
-        string rg_tag = "UNK";
-        switch(g_regime){
-            case REG_CHOPPY:              rg_tag = "CHOPPY";       break;
-            case REG_RANGING:             rg_tag = "RANGE";        break;
-            case REG_LONG_RANGING:        rg_tag = "LONG-RANGE";   break;
-            case REG_EARLY_BREAKOUT:      rg_tag = "EARLY-BR";     break;
-            case REG_CONFIRMED_TREND:     rg_tag = "TREND";        break;
-            case REG_DIRECTIONAL:         rg_tag = "DIR";          break;
-            case REG_STRONG_DIRECTIONAL:  rg_tag = "STRONG-DIR";   break;
-            default:                      rg_tag = "UNK";          break;
-        }
-        rg_val = StringFormat("%s ER=%.2f %s", rg_tag, g_regime_er, g_regime_reason);
-        // v13.11.0 — color row by signal-class semantic (matches chart label):
-        //   VALID-class (DIR/STRONG_DIR/CONFIRMED) → green
-        //   SOFT-class  (RANGE/LONG-RANGE/EARLY-BR) → yellow (LIMITED)
-        //   BLOCKED-class (CHOPPY or block-flagged RANGE/LONG-RANGE) → magenta
-        ENUM_SIGNAL_CLASS rcls = RegimeLabelClass(g_regime);
-        if(g_regime_block && rcls==SC_SOFT)   rg_c=DB_CLR_MAGENTA;
-        else if(rcls==SC_BLOCKED)             rg_c=DB_CLR_MAGENTA;
-        else if(rcls==SC_SOFT)                rg_c=DB_CLR_YELLOW;
-        else                                  rg_c=DB_CLR_GREEN;
-    }
-    DrawDR("REG",row++,"Regime",rg_val,rg_c,yb);
+    string htfv = StringFormat("H1=%s M15=%s", InpUseH1Bias?"ON":"OFF", InpUseM15Setup?"ON":"OFF");
+    DrawDR("HTF",row++,"HTF Gate", htf_block?"BLOCK":"PASS", htf_block?DB_CLR_RED:DB_CLR_GREEN, yb);
+    DrawDR("HTFC",row++,"HTF Config", htfv, DB_CLR_CYAN, yb);
 
     // Spike SL
     DrawDR("SPKA",row++,"Spike ATRMult",InpUseSpikeSL?DoubleToString(InpSpike_ATR_Mult,1)+"x":"OFF",InpUseSpikeSL?DB_CLR_WHITE:DB_CLR_GRAY,yb);
@@ -4733,11 +4577,7 @@ void OnTick(){
                 // Entry/exit branches still use g_pipe_hard/g_pipe_soft (filter
                 // pipeline including regime block), so behavior is unchanged
                 // when regime is OFF or when regime status matches filter.
-                ENUM_SIGNAL_CLASS filter_cls = g_pipe_filter_hard ? SC_BLOCKED : SC_VALID;
-                ENUM_SIGNAL_CLASS regime_cls = InpRegime_Enable
-                                              ? RegimeLabelClass(g_regime) : SC_VALID;
-                ENUM_SIGNAL_CLASS live_label = CombineSignalClass(filter_cls, regime_cls);
-                if(g_pipe_hard) live_label = SC_BLOCKED;
+                ENUM_SIGNAL_CLASS live_label = g_pipe_hard ? SC_BLOCKED : SC_VALID;
 
                 if(pipe_ok&&!g_pipe_hard){
                     // VALID per filter pipeline. Label may be SOFT if regime is
