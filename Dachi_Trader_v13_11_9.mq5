@@ -1,10 +1,10 @@
-// Dachi_Trader_v13_11_8.mq5 — Expert Advisor
-// Version: 13.11.8
+// Dachi_Trader_v13_11_9.mq5 — Expert Advisor
+// Version: 13.11.9
 // Clean Core branch: simplified runtime pipeline (F2 + HTF gate).
 
 #property copyright   "Daniel @danieljulyanto"
-#property version     "13.11.8"
-#property description "Dachi Trader v13.11.8 — Expert Advisor"
+#property version     "13.11.9"
+#property description "Dachi Trader v13.11.9 — Expert Advisor"
 
 #define MAX_TP            30
 #define VOL_AVG_PERIOD    20
@@ -593,7 +593,7 @@ bool LIC_VerifyOnce(){
     }
     string url = InpLicense_URL + "/backend/api/license/verify.php";
     long account = AccountInfoInteger(ACCOUNT_LOGIN);
-    string body = StringFormat("{\"account_number\":\"%I64u\",\"ea_version\":\"13.11.8\"}", (ulong)account);
+    string body = StringFormat("{\"account_number\":\"%I64u\",\"ea_version\":\"13.11.9\"}", (ulong)account);
     char post[]; StringToCharArray(body, post, 0, StringLen(body));
     char result[]; string headers="Content-Type: application/json\r\n"; string resp_headers;
     int timeout = 5000;
@@ -1076,7 +1076,7 @@ int OnInit(){
     ChartSetInteger(0,CHART_SHOW_GRID,false);ChartSetInteger(0,CHART_MODE,CHART_CANDLES);
 
     Print("==============================================================");
-    Print("[INIT] Dachi Trader v13.11.8 | ",_Symbol," ",EnumToString(_Period),
+    Print("[INIT] Dachi Trader v13.11.9 | ",_Symbol," ",EnumToString(_Period),
           " | Mode=",(InpIndicatorOnly?"INDICATOR":"EA ACTIVE"));
     string slmm=(InpSlowMA_Method==MODE_EMA?"EMA":InpSlowMA_Method==MODE_SMMA?"SMMA":InpSlowMA_Method==MODE_LWMA?"LWMA":"SMA");
     Print("[INIT] Core: EMA",InpEMA_Fast,"/",slmm,InpSMA_Slow," | ATR",InpATR_Period);
@@ -1131,7 +1131,7 @@ void OnDeinit(const int reason){
     if(h_regime_ema_fast!=INVALID_HANDLE)IndicatorRelease(h_regime_ema_fast);
     if(h_regime_ema_slow!=INVALID_HANDLE)IndicatorRelease(h_regime_ema_slow);
     LIC_ClearOverlay();
-    Print("[DEINIT] Dachi v13.11.8 removed");
+    Print("[DEINIT] Dachi v13.11.9 removed");
 }
 
 void OnTimer(){
@@ -1258,7 +1258,7 @@ uint ComputeFilterHash(){
     // v13.11.2 — fallback slope guard inputs
     h = (h ^ (uint)InpRegime_FallbackSlopeBars)              * 16777619;
     h = (h ^ (uint)(int)(InpRegime_FallbackSlopeATRMult*100))* 16777619;
-    h = (h ^ (uint)0x13C00080)             * 16777619;   // logic version marker
+    h = (h ^ (uint)0x13C00090)             * 16777619;   // logic version marker
     return h;
 }
 
