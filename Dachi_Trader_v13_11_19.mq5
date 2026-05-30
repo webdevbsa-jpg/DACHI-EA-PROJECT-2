@@ -1,10 +1,10 @@
-// Dachi_Trader_v13_11_18.mq5 — Expert Advisor
-// Version: 13.11.18
+// Dachi_Trader_v13_11_19.mq5 — Expert Advisor
+// Version: 13.11.19
 // Clean Core branch: simplified runtime pipeline (F2 + HTF gate).
 
 #property copyright   "Daniel @danieljulyanto"
-#property version     "13.11.18"
-#property description "Dachi Trader v13.11.18 — Expert Advisor"
+#property version     "13.11.19"
+#property description "Dachi Trader v13.11.19 — Expert Advisor"
 
 #define MAX_TP            30
 #define VOL_AVG_PERIOD    20
@@ -65,6 +65,16 @@ input bool   InpUseM15Setup       = true;
 input bool   InpAllowM15Neutral   = false;
 input bool   InpHTF_AllowReversalOverride = true;
 input double InpHTF_ReversalBodyATRMin    = 0.70;
+
+input group "=== Supertrend Bias Guard (separate from HTF) ==="
+input bool            InpUseSupertrendGuard = false;
+input ENUM_TIMEFRAMES InpST_TF              = PERIOD_M15;
+input int             InpST_ATRPeriod       = 10;
+input double          InpST_Multiplier      = 2.5;
+input bool            InpST_BlockNeutral    = false;
+input bool            InpST_ShowVisual      = true;
+input int             InpST_VisualBars      = 80;
+
 input bool   InpUseSidewayGuard           = true;
 input double InpSideway_MinEMASlopePts    = 0.35;
 input int    InpSideway_CrossLookback      = 12;
@@ -472,6 +482,9 @@ ENUM_SQUEEZE_STATE g_sq_state = SQ_NONE;
 double g_sq_range_high = 0.0;
 double g_sq_range_low = 0.0;
 string g_sq_reason = "";
+int    g_st_dir = 0;
+double g_st_line = 0.0;
+string g_st_state = "OFF";
 
 // === v13.9.0 Wick / Liquidity Sweep state ===
 bool   g_wick_bad_sweep=false;
@@ -624,7 +637,7 @@ bool LIC_VerifyOnce(){
     }
     string url = InpLicense_URL + "/backend/api/license/verify.php";
     long account = AccountInfoInteger(ACCOUNT_LOGIN);
-    string body = StringFormat("{\"account_number\":\"%I64u\",\"ea_version\":\"13.11.18\"}", (ulong)account);
+    string body = StringFormat("{\"account_number\":\"%I64u\",\"ea_version\":\"13.11.19\"}", (ulong)account);
     char post[]; StringToCharArray(body, post, 0, StringLen(body));
     char result[]; string headers="Content-Type: application/json\r\n"; string resp_headers;
     int timeout = 5000;
@@ -1107,7 +1120,7 @@ int OnInit(){
     ChartSetInteger(0,CHART_SHOW_GRID,false);ChartSetInteger(0,CHART_MODE,CHART_CANDLES);
 
     Print("==============================================================");
-    Print("[INIT] Dachi Trader v13.11.18 | ",_Symbol," ",EnumToString(_Period),
+    Print("[INIT] Dachi Trader v13.11.19 | ",_Symbol," ",EnumToString(_Period),
           " | Mode=",(InpIndicatorOnly?"INDICATOR":"EA ACTIVE"));
     string slmm=(InpSlowMA_Method==MODE_EMA?"EMA":InpSlowMA_Method==MODE_SMMA?"SMMA":InpSlowMA_Method==MODE_LWMA?"LWMA":"SMA");
     Print("[INIT] Core: EMA",InpEMA_Fast,"/",slmm,InpSMA_Slow," | ATR",InpATR_Period);
@@ -1162,14 +1175,14 @@ void OnDeinit(const int reason){
     if(h_regime_ema_fast!=INVALID_HANDLE)IndicatorRelease(h_regime_ema_fast);
     if(h_regime_ema_slow!=INVALID_HANDLE)IndicatorRelease(h_regime_ema_slow);
     LIC_ClearOverlay();
-    Print("[DEINIT] Dachi v13.11.18 removed");
+    Print("[DEINIT] Dachi v13.11.19 removed");
 }
 
 void OnTimer(){
     if(!g_history_done){
         if(Bars(_Symbol,_Period)>InpSMA_Slow+50){
             g_history_done=true;g_current_bar=Bars(_Symbol,_Period);
-            ReadIndicators();DrawEMARibbon();ScanHistory();
+            ReadIndicators();DrawEMARibbon();DrawSupertrendVisual();ScanHistory();
             if(!InpIndicatorOnly)ReconcilePositionState();
             if(UseLateEntry()&&g_last_signal!=0&&HasActivePosition())CheckLateEntry();
             DrawTPSLLines();DrawDashboard(true);ChartRedraw();
@@ -1249,6 +1262,11 @@ uint ComputeFilterHash(){
     h = (h ^ (uint)(InpAllowM15Neutral?1:0))     * 16777619;
     h = (h ^ (uint)(InpHTF_AllowReversalOverride?1:0)) * 16777619;
     h = (h ^ (uint)(int)(InpHTF_ReversalBodyATRMin*100)) * 16777619;
+    h = (h ^ (uint)(InpUseSupertrendGuard?1:0)) * 16777619;
+    h = (h ^ (uint)InpST_TF) * 16777619;
+    h = (h ^ (uint)InpST_ATRPeriod) * 16777619;
+    h = (h ^ (uint)(int)(InpST_Multiplier*100)) * 16777619;
+    h = (h ^ (uint)(InpST_BlockNeutral?1:0)) * 16777619;
     h = (h ^ (uint)(InpUseSidewayGuard?1:0)) * 16777619;
     h = (h ^ (uint)(int)(InpSideway_MinEMASlopePts*100)) * 16777619;
     h = (h ^ (uint)InpSideway_CrossLookback) * 16777619;
@@ -1274,7 +1292,7 @@ uint ComputeFilterHash(){
     h = (h ^ (uint)(int)(InpSQ_SellCloseLocMax*100)) * 16777619;
     h = (h ^ (uint)(int)(InpSQ_SpikeRatioBlock*100)) * 16777619;
 
-    h = (h ^ (uint)0x13C00180)             * 16777619;   // logic version marker
+    h = (h ^ (uint)0x13C00190)             * 16777619;   // logic version marker
     return h;
 }
 
@@ -1629,6 +1647,92 @@ bool IsReversalOverride(int sig, int idx){
     return strong_body && strong_close;
 }
 
+bool CalcSupertrendAt(ENUM_TIMEFRAMES tf, int idx, double &out_line, int &out_dir){
+    out_line=0.0; out_dir=0;
+    int period=MathMax(1, InpST_ATRPeriod);
+    int warmup=MathMax(50, period*6);
+    int need=idx+warmup+2;
+    if(Bars(_Symbol,tf)<=need) return false;
+    int hst_atr=iATR(_Symbol,tf,period);
+    if(hst_atr==INVALID_HANDLE) return false;
+    double atr[]; ArraySetAsSeries(atr,true);
+    if(CopyBuffer(hst_atr,0,0,need,atr)<need){ IndicatorRelease(hst_atr); return false; }
+    IndicatorRelease(hst_atr);
+
+    double final_upper=0.0, final_lower=0.0;
+    int dir=0;
+    for(int k=idx+warmup; k>=idx; k--){
+        double hi=iHigh(_Symbol,tf,k), lo=iLow(_Symbol,tf,k), cl=iClose(_Symbol,tf,k);
+        if(hi<=0 || lo<=0 || cl<=0 || atr[k]<=0) return false;
+        double mid=(hi+lo)*0.5;
+        double basic_upper=mid + InpST_Multiplier*atr[k];
+        double basic_lower=mid - InpST_Multiplier*atr[k];
+        if(k==idx+warmup){
+            final_upper=basic_upper;
+            final_lower=basic_lower;
+            dir=(cl>=mid)?1:-1;
+        } else {
+            double prev_close=iClose(_Symbol,tf,k+1);
+            double prev_upper=final_upper, prev_lower=final_lower;
+            final_upper=(prev_close>prev_upper)?MathMin(basic_upper,prev_upper):basic_upper;
+            final_lower=(prev_close<prev_lower)?MathMax(basic_lower,prev_lower):basic_lower;
+            if(dir>=0) dir=(cl<final_lower)?-1:1;
+            else       dir=(cl>final_upper)? 1:-1;
+        }
+    }
+    out_dir=dir;
+    out_line=(dir>=0)?final_lower:final_upper;
+    return true;
+}
+
+bool SupertrendBlocks(int sig, int idx){
+    g_st_dir=0; g_st_line=0.0; g_st_state=InpUseSupertrendGuard?"ERR":"OFF";
+    if(!InpUseSupertrendGuard) return false;
+    int htf_shift=idx;
+    if(InpST_TF!=PERIOD_CURRENT && InpST_TF!=_Period){
+        datetime t=iTime(_Symbol,_Period,idx);
+        htf_shift=iBarShift(_Symbol,InpST_TF,t,false);
+        if(htf_shift<0){ g_st_state="NO_BAR"; return InpST_BlockNeutral; }
+    }
+    if(!CalcSupertrendAt((InpST_TF==PERIOD_CURRENT?_Period:InpST_TF), htf_shift, g_st_line, g_st_dir)){
+        g_st_state="NO_DATA";
+        return InpST_BlockNeutral;
+    }
+    g_st_state=(g_st_dir>0?"BUY":"SELL");
+    return (sig!=g_st_dir);
+}
+
+void ClearSupertrendVisual(){
+    for(int i=ObjectsTotal(0,0,-1)-1;i>=0;i--){
+        string n=ObjectName(0,i,0,-1);
+        if(StringFind(n,ObjName("ST_"))==0) ObjectDelete(0,n);
+    }
+}
+
+void DrawSupertrendVisual(){
+    ClearSupertrendVisual();
+    if(!InpST_ShowVisual) return;
+    ENUM_TIMEFRAMES tf=(InpST_TF==PERIOD_CURRENT?_Period:InpST_TF);
+    int bars=MathMax(5,MathMin(InpST_VisualBars,200));
+    if(Bars(_Symbol,tf)<bars+InpST_ATRPeriod+10) return;
+    for(int k=bars; k>=1; k--){
+        double l0=0,l1=0; int d0=0,d1=0;
+        if(!CalcSupertrendAt(tf,k,l0,d0) || !CalcSupertrendAt(tf,k-1,l1,d1)) continue;
+        datetime t0=iTime(_Symbol,tf,k), t1=iTime(_Symbol,tf,k-1);
+        string n=ObjName("ST_"+IntegerToString(k));
+        if(ObjectFind(0,n)<0) ObjectCreate(0,n,OBJ_TREND,0,t0,l0,t1,l1);
+        else{ ObjectSetInteger(0,n,OBJPROP_TIME,0,t0); ObjectSetDouble(0,n,OBJPROP_PRICE,0,l0); ObjectSetInteger(0,n,OBJPROP_TIME,1,t1); ObjectSetDouble(0,n,OBJPROP_PRICE,1,l1); }
+        ObjectSetInteger(0,n,OBJPROP_COLOR,(d1>0?clrLime:clrTomato));
+        ObjectSetInteger(0,n,OBJPROP_WIDTH,2);
+        ObjectSetInteger(0,n,OBJPROP_STYLE,STYLE_SOLID);
+        ObjectSetInteger(0,n,OBJPROP_RAY_RIGHT,false);
+        ObjectSetInteger(0,n,OBJPROP_RAY_LEFT,false);
+        ObjectSetInteger(0,n,OBJPROP_BACK,false);
+        ObjectSetInteger(0,n,OBJPROP_SELECTABLE,false);
+        ObjectSetInteger(0,n,OBJPROP_HIDDEN,true);
+    }
+}
+
 bool SidewayBlocks(int sig, int idx){
     if(!InpUseSidewayGuard) return false;
     double e0[1], e4[1], s0[1];
@@ -1816,6 +1920,7 @@ bool EvaluatePipeline(int sig){
     }
 
     bool h_htf = HTFContextBlocks(sig, 1);
+    bool h_st = SupertrendBlocks(sig, 1);
     bool h_sideway = SidewayBlocks(sig, 1);
     string atr_state="";
     ENUM_FILTER_DECISION atr_dec = EvalATRHealthAt(1, atr_state);
@@ -1825,7 +1930,7 @@ bool EvaluatePipeline(int sig){
     bool s_atr = (atr_dec==DEC_LIMITED);
     bool h_sq = (sq_dec==DEC_BLOCKED);
     bool s_sq = (sq_dec==DEC_LIMITED);
-    g_pipe_filter_hard = h_f2 || h_htf || h_sideway || h_atr || h_sq;
+    g_pipe_filter_hard = h_f2 || h_htf || h_st || h_sideway || h_atr || h_sq;
     g_pipe_soft = s_atr || s_sq;
     g_pipe_hard = g_pipe_filter_hard;
     return !g_pipe_hard;
@@ -1837,6 +1942,7 @@ bool EvaluatePipelineAt(int idx, int sig, bool &out_hard, bool &out_soft){
     out_hard=false; out_soft=false;
     if(InpF2_Action!=F_OFF && EvalF2At(idx)) out_hard=true;
     if(HTFContextBlocks(sig, idx)) out_hard=true;
+    if(SupertrendBlocks(sig, idx)) out_hard=true;
     if(SidewayBlocks(sig, idx)) out_hard=true;
     string atr_state="";
     ENUM_FILTER_DECISION atr_dec = EvalATRHealthAt(idx, atr_state);
@@ -2921,6 +3027,7 @@ void ScanHistory(){
     if(scan<3)return;Print("[SCAN] ",scan," bars...");
     int sc=0,sc_blocked=0,sc_soft=0;
     ENUM_SQUEEZE_STATE sq_save_state=g_sq_state; double sq_save_hi=g_sq_range_high, sq_save_lo=g_sq_range_low; string sq_save_reason=g_sq_reason;
+    int st_save_dir=g_st_dir; double st_save_line=g_st_line; string st_save_state=g_st_state;
     int last_dir=0; double last_entry=0, last_atr=0; bool last_tight=false;
     ENUM_SIGNAL_CLASS last_cls=SC_BLOCKED;
     bool has_last=false;
@@ -3007,6 +3114,7 @@ void ScanHistory(){
     }
     g_entry_bar=g_current_bar;g_bars_in_trade=0;
     g_sq_state=sq_save_state; g_sq_range_high=sq_save_hi; g_sq_range_low=sq_save_lo; g_sq_reason=sq_save_reason;
+    g_st_dir=st_save_dir; g_st_line=st_save_line; g_st_state=st_save_state;
 }
 
 // === DASHBOARD HELPERS ===
@@ -3096,7 +3204,9 @@ void DrawDashboard(bool force){
     int n_hard=0;
     if(InpF2_Action!=F_OFF && g_f2_trig) n_hard++;
     bool htf_block = HTFContextBlocks((g_last_signal==0?1:g_last_signal), 1);
+    bool st_block = SupertrendBlocks((g_last_signal==0?1:g_last_signal),1);
     if(htf_block) n_hard++;
+    if(st_block) n_hard++;
     string fsum_val=IntegerToString(n_hard)+"H "+g_last_decision;
     color fsum_c=n_hard>0?DB_CLR_RED:DB_CLR_GREEN;
     DrawDR("FSUM",row++,"Filters",fsum_val,fsum_c,yb);
@@ -3106,6 +3216,7 @@ void DrawDashboard(bool force){
     string htfv = StringFormat("H1=%s M15=%s RevOVR=%s", InpUseH1Bias?"ON":"OFF", InpUseM15Setup?"ON":"OFF", InpHTF_AllowReversalOverride?"ON":"OFF");
     DrawDR("HTF",row++,"HTF Gate", htf_block?"BLOCK":"PASS", htf_block?DB_CLR_RED:DB_CLR_GREEN, yb);
     DrawDR("HTFC",row++,"HTF Config", htfv, DB_CLR_CYAN, yb);
+    DrawDR("ST",row++,"Supertrend", (InpUseSupertrendGuard?(g_st_state+" "+EnumToString(InpST_TF)):"OFF"), !InpUseSupertrendGuard?DB_CLR_GRAY:(st_block?DB_CLR_RED:(g_st_dir>0?DB_CLR_GREEN:DB_CLR_ORANGE)), yb);
     DrawDR("SQ",row++,"Squeeze", SqueezeStateToString(g_sq_state)+" "+g_sq_reason, g_sq_state==SQ_ARMED||g_sq_state==SQ_FALSE_BREAK?DB_CLR_RED:(g_sq_state==SQ_BREAKOUT_UP||g_sq_state==SQ_BREAKOUT_DN?DB_CLR_YELLOW:DB_CLR_GRAY), yb);
 
     // Spike SL
@@ -3179,7 +3290,7 @@ void OnTick(){
     int rt=Bars(_Symbol,_Period);if(rt<InpSMA_Slow+50)return;
     if(!g_history_done){
         g_history_done=true;g_current_bar=rt;
-        DrawEMARibbon();ScanHistory();
+        DrawEMARibbon();DrawSupertrendVisual();ScanHistory();
         if(!InpIndicatorOnly)ReconcilePositionState();
         if(UseLateEntry()&&g_last_signal!=0&&HasActivePosition())CheckLateEntry();
         DrawTPSLLines();DrawDashboard(true);ChartRedraw();return;
@@ -3254,7 +3365,7 @@ void OnTick(){
                 if(!InpIndicatorOnly){
                     if(!EAClose("REVERSE")){
                         Print("[REV] CRITICAL close failed — aborting new entry.");
-                        DrawEMARibbon();g_dashboard_dirty=true;DrawTPSLLines();
+                        DrawEMARibbon();DrawSupertrendVisual();g_dashboard_dirty=true;DrawTPSLLines();
                         if(g_dashboard_dirty){DrawDashboard(false);g_dashboard_dirty=false;}
                         return;
                     }
@@ -3307,6 +3418,7 @@ void OnTick(){
                         string breason;
                         if(g_f2_trig) breason="F2";
                         else if(HTFContextBlocks(sig,1)) breason="HTF";
+                        else if(SupertrendBlocks(sig,1)) breason="SUPERTREND";
                         else if(SidewayBlocks(sig,1)) breason="SIDEWAY";
                         else breason="FILTER";
                         ArmF3Recovery(sig,st,breason);
@@ -3355,7 +3467,7 @@ void OnTick(){
         }
 
         ProcessRetestReentry();
-        DrawEMARibbon();g_dashboard_dirty=true;
+        DrawEMARibbon();DrawSupertrendVisual();g_dashboard_dirty=true;
     }
     DrawTPSLLines();
     if(g_dashboard_dirty){DrawDashboard(false);g_dashboard_dirty=false;}
