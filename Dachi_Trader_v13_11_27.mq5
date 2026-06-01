@@ -1,10 +1,10 @@
-// Dachi_Trader_v13_11_26.mq5 — Expert Advisor
-// Version: 13.11.26
+// Dachi_Trader_v13_11_27.mq5 — Expert Advisor
+// Version: 13.11.27
 // Clean Core branch: simplified runtime pipeline (F2 + HTF gate).
 
 #property copyright   "Daniel @danieljulyanto"
-#property version     "13.11.26"
-#property description "Dachi Trader v13.11.26 — Expert Advisor"
+#property version     "13.11.27"
+#property description "Dachi Trader v13.11.27 — Expert Advisor"
 
 #define MAX_TP            30
 #define VOL_AVG_PERIOD    20
@@ -60,6 +60,10 @@ input int    InpEMA_Fast        = 8;
 input int    InpSMA_Slow        = 20;
 input ENUM_MA_METHOD InpSlowMA_Method = MODE_LWMA;  // Slow MA method: SMA/EMA/SMMA/LWMA (v13.9.2: LWMA20 baseline)
 input int    InpATR_Period      = 14;
+
+input group "=== Visual Slow MA Angle Guard ==="
+input bool   InpUseSlowMAAngleGuard   = true;
+input double InpSlowMA_MinAngleDeg    = 0.0;    // BUY needs >= +deg, SELL needs <= -deg; 0 allows flat in signal direction
 
 input group "=== Clean Core HTF Context (H1 Bias + M15 Setup) ==="
 input bool   InpUseH1Bias         = true;
@@ -485,6 +489,7 @@ string g_last_decision="---"; // "V","S","B","D"
 
 // === F0 dashboard fix ===
 double g_last_signal_gap_pts=0;
+double g_slowma_angle_deg=0.0; bool g_slowma_angle_block=false; string g_slowma_angle_state="OFF";
 ENUM_SQUEEZE_STATE g_sq_state = SQ_NONE;
 double g_sq_range_high = 0.0;
 double g_sq_range_low = 0.0;
@@ -645,7 +650,7 @@ bool LIC_VerifyOnce(){
     }
     string url = InpLicense_URL + "/backend/api/license/verify.php";
     long account = AccountInfoInteger(ACCOUNT_LOGIN);
-    string body = StringFormat("{\"account_number\":\"%I64u\",\"ea_version\":\"13.11.26\"}", (ulong)account);
+    string body = StringFormat("{\"account_number\":\"%I64u\",\"ea_version\":\"13.11.27\"}", (ulong)account);
     char post[]; StringToCharArray(body, post, 0, StringLen(body));
     char result[]; string headers="Content-Type: application/json\r\n"; string resp_headers;
     int timeout = 5000;
@@ -1034,7 +1039,7 @@ int OnInit(){
     g_visual_sl=0;g_visual_atr=0;g_visual_tp_unlocked=5;g_peak_price=0;g_peak_bar=0;
     g_retest_armed=false;g_retest_dir=0;g_retest_counter=0;g_retest_seen_pullback=false;
     g_pipe_hard=false;g_pipe_soft=false;g_last_decision="---";
-    g_last_signal_gap_pts=0;
+    g_last_signal_gap_pts=0;g_slowma_angle_deg=0.0;g_slowma_angle_block=false;g_slowma_angle_state="OFF";
     g_f3_armed=false;g_f3_dir=0;g_f3_counter=0;g_f3_break_high=0;g_f3_break_low=0;g_f3_time=0;g_f3_reason="---";
     g_f3_fire_time=0;g_f3_fire_cross_px=0;g_f3_fire_atr=0;g_f3_fire_dir=0;
     g_pe_bep_armed=false;g_pe_entry_time=0;
@@ -1137,7 +1142,7 @@ int OnInit(){
     ChartSetInteger(0,CHART_SHOW_GRID,false);ChartSetInteger(0,CHART_MODE,CHART_CANDLES);
 
     Print("==============================================================");
-    Print("[INIT] Dachi Trader v13.11.26 | ",_Symbol," ",EnumToString(_Period),
+    Print("[INIT] Dachi Trader v13.11.27 | ",_Symbol," ",EnumToString(_Period),
           " | Mode=",(InpIndicatorOnly?"INDICATOR":"EA ACTIVE"));
     string slmm=(InpSlowMA_Method==MODE_EMA?"EMA":InpSlowMA_Method==MODE_SMMA?"SMMA":InpSlowMA_Method==MODE_LWMA?"LWMA":"SMA");
     Print("[INIT] Core: EMA",InpEMA_Fast,"/",slmm,InpSMA_Slow," | ATR",InpATR_Period);
@@ -1192,7 +1197,7 @@ void OnDeinit(const int reason){
     if(h_regime_ema_fast!=INVALID_HANDLE)IndicatorRelease(h_regime_ema_fast);
     if(h_regime_ema_slow!=INVALID_HANDLE)IndicatorRelease(h_regime_ema_slow);
     LIC_ClearOverlay();
-    Print("[DEINIT] Dachi v13.11.26 removed");
+    Print("[DEINIT] Dachi v13.11.27 removed");
 }
 
 void OnTimer(){
@@ -1270,6 +1275,8 @@ uint ComputeFilterHash(){
     h = (h ^ (uint)InpEMA_Fast)            * 16777619;
     h = (h ^ (uint)InpSMA_Slow)            * 16777619;
     h = (h ^ (uint)InpSlowMA_Method)       * 16777619;
+    h = (h ^ (uint)(InpUseSlowMAAngleGuard?1:0)) * 16777619;
+    h = (h ^ (uint)(int)(InpSlowMA_MinAngleDeg*100)) * 16777619;
     h = (h ^ (uint)InpF2_Action)           * 16777619;
     h = (h ^ (uint)(int)(InpF2_MaxDistATR*100))  * 16777619;
 
@@ -1314,7 +1321,7 @@ uint ComputeFilterHash(){
     h = (h ^ (uint)(int)(InpSQ_SellCloseLocMax*100)) * 16777619;
     h = (h ^ (uint)(int)(InpSQ_SpikeRatioBlock*100)) * 16777619;
 
-    h = (h ^ (uint)0x13C00260)             * 16777619;   // logic version marker
+    h = (h ^ (uint)0x13C00270)             * 16777619;   // logic version marker
     return h;
 }
 
@@ -1488,6 +1495,59 @@ bool EvalF2At(int idx){
     return (dist > InpF2_MaxDistATR * atr_use);
 }
 bool EvalF2(){ return EvalF2At(1); }
+
+bool CalcSlowMAVisualAngleAt(int idx, double &angle_deg){
+    angle_deg=0.0;
+    double es[]; ArraySetAsSeries(es,true);
+    if(CopyBuffer(h_sma_slow,0,idx,2,es)<2) return false;
+
+    datetime t_new=iTime(_Symbol,_Period,idx);
+    datetime t_old=iTime(_Symbol,_Period,idx+1);
+    if(t_new<=0 || t_old<=0 || t_new==t_old) return false;
+
+    int x_old=0,y_old=0,x_new=0,y_new=0;
+    bool ok_old=ChartTimePriceToXY(0,0,t_old,es[1],x_old,y_old);
+    bool ok_new=ChartTimePriceToXY(0,0,t_new,es[0],x_new,y_new);
+    if(ok_old && ok_new && x_new!=x_old){
+        double dx=(double)(x_new-x_old);
+        double dy=(double)(y_old-y_new); // screen Y grows downward; positive dy means visually rising
+        angle_deg=MathArctan(dy/dx)*180.0/3.14159265358979323846;
+        return true;
+    }
+
+    int visible=(int)ChartGetInteger(0,CHART_VISIBLE_BARS);
+    int width=(int)ChartGetInteger(0,CHART_WIDTH_IN_PIXELS);
+    int height=(int)ChartGetInteger(0,CHART_HEIGHT_IN_PIXELS);
+    double pmin=ChartGetDouble(0,CHART_PRICE_MIN,0);
+    double pmax=ChartGetDouble(0,CHART_PRICE_MAX,0);
+    if(visible<=0 || width<=0 || height<=0 || pmax<=pmin) return false;
+
+    double dx=(double)width/(double)visible;
+    double dy=(es[0]-es[1])/(pmax-pmin)*(double)height;
+    if(dx<=0.0) return false;
+    angle_deg=MathArctan(dy/dx)*180.0/3.14159265358979323846;
+    return true;
+}
+
+bool SlowMAAngleBlocks(int sig, int idx){
+    g_slowma_angle_block=false;
+    g_slowma_angle_state=InpUseSlowMAAngleGuard?"ERR":"OFF";
+    g_slowma_angle_deg=0.0;
+    if(!InpUseSlowMAAngleGuard) return false;
+
+    double angle=0.0;
+    if(!CalcSlowMAVisualAngleAt(idx,angle)){
+        g_slowma_angle_state="NO_DATA";
+        return false;
+    }
+
+    g_slowma_angle_deg=angle;
+    double th=MathMax(0.0,InpSlowMA_MinAngleDeg);
+    bool block=(sig>0 ? (angle < th) : (angle > -th));
+    g_slowma_angle_block=block;
+    g_slowma_angle_state=DoubleToString(angle,1)+"°";
+    return block;
+}
 
 // === F3 FALSE-BLOCK RECOVERY (was F11 pre-v13.10.0) ===
 // Gates (in order): cooldown after losing F3 → cross density (anti-sideway) →
@@ -2014,6 +2074,7 @@ bool EvaluatePipeline(int sig){
 
     bool h_htf = HTFContextBlocks(sig, 1);
     bool h_est = EvasiveSTBlocks(sig, 1);
+    bool h_slow_angle = SlowMAAngleBlocks(sig, 1);
     bool h_sideway = SidewayBlocks(sig, 1);
     string atr_state="";
     ENUM_FILTER_DECISION atr_dec = EvalATRHealthAt(1, atr_state);
@@ -2023,7 +2084,7 @@ bool EvaluatePipeline(int sig){
     bool s_atr = (atr_dec==DEC_LIMITED);
     bool h_sq = (sq_dec==DEC_BLOCKED);
     bool s_sq = (sq_dec==DEC_LIMITED);
-    g_pipe_filter_hard = h_f2 || h_htf || h_est || h_sideway || h_atr || h_sq;
+    g_pipe_filter_hard = h_f2 || h_htf || h_est || h_slow_angle || h_sideway || h_atr || h_sq;
     g_pipe_soft = s_atr || s_sq;
     g_pipe_hard = g_pipe_filter_hard;
     return !g_pipe_hard;
@@ -2036,6 +2097,7 @@ bool EvaluatePipelineAt(int idx, int sig, bool &out_hard, bool &out_soft){
     if(InpF2_Action!=F_OFF && EvalF2At(idx)) out_hard=true;
     if(HTFContextBlocks(sig, idx)) out_hard=true;
     if(EvasiveSTBlocks(sig, idx)) out_hard=true;
+    if(SlowMAAngleBlocks(sig, idx)) out_hard=true;
     if(SidewayBlocks(sig, idx)) out_hard=true;
     string atr_state="";
     ENUM_FILTER_DECISION atr_dec = EvalATRHealthAt(idx, atr_state);
@@ -3287,7 +3349,7 @@ void DrawDashboard(bool force){
     if(!g_dash_visible){
         for(int i=ObjectsTotal(0,0,-1)-1;i>=0;i--){string n=ObjectName(0,i,0,-1);if(StringFind(n,OBJ_PREFIX+"DB_")==0)ObjectDelete(0,n);}return;
     }
-    int nr=27,ph=(nr+1)*DB_LINE_H+DB_Y_BASE+8;
+    int nr=28,ph=(nr+1)*DB_LINE_H+DB_Y_BASE+8;
     string bg=ObjName("DB_BG");ObjectCreate(0,bg,OBJ_RECTANGLE_LABEL,0,0,0);
     ObjectSetInteger(0,bg,OBJPROP_CORNER,DB_CORNER);ObjectSetInteger(0,bg,OBJPROP_XDISTANCE,2);
     ObjectSetInteger(0,bg,OBJPROP_YDISTANCE,2+ph);ObjectSetInteger(0,bg,OBJPROP_XSIZE,DB_PANEL_W);
@@ -3313,11 +3375,13 @@ void DrawDashboard(bool force){
     int dash_sig=(g_last_signal==0?1:g_last_signal);
     bool htf_block = HTFContextBlocks(dash_sig, 1);
     bool est_block = EvasiveSTBlocks(dash_sig,1);
+    bool slow_angle_block = SlowMAAngleBlocks(dash_sig,1);
     bool side_block = SidewayBlocks(dash_sig,1);
     string atr_state=""; ENUM_FILTER_DECISION atr_dec=EvalATRHealthAt(1,atr_state);
     string sq_state="", sq_reason=""; ENUM_FILTER_DECISION sq_dec=EvalSqueezeGuard(dash_sig,1,sq_state,sq_reason);
     if(htf_block) n_hard++;
     if(est_block) n_hard++;
+    if(slow_angle_block) n_hard++;
     if(side_block) n_hard++;
     if(atr_dec==DEC_BLOCKED) n_hard++;
     if(sq_dec==DEC_BLOCKED) n_hard++;
@@ -3331,6 +3395,7 @@ void DrawDashboard(bool force){
     DrawDR("HTF",row++,"HTF Gate", htf_block?"BLOCK":"PASS", htf_block?DB_CLR_RED:DB_CLR_GREEN, yb);
     DrawDR("HTFC",row++,"HTF Config", htfv, DB_CLR_CYAN, yb);
     DrawDR("EST",row++,"V-Line", (InpUseVLineGuard?(g_est_state+" "+EnumToString(InpVLine_TF)):"OFF"), !InpUseVLineGuard?DB_CLR_GRAY:(est_block?DB_CLR_RED:(g_est_dir>0?DB_CLR_GREEN:DB_CLR_ORANGE)), yb);
+    DrawDR("SANG",row++,"SlowMA Angle", InpUseSlowMAAngleGuard?g_slowma_angle_state:"OFF", !InpUseSlowMAAngleGuard?DB_CLR_GRAY:(slow_angle_block?DB_CLR_RED:DB_CLR_GREEN), yb);
     DrawDR("ATRH",row++,"ATR Health", InpUseATRHealthGuard?atr_state:"OFF", !InpUseATRHealthGuard?DB_CLR_GRAY:(atr_dec==DEC_BLOCKED?DB_CLR_RED:(atr_dec==DEC_LIMITED?DB_CLR_YELLOW:DB_CLR_GREEN)), yb);
     DrawDR("SQ",row++,"Squeeze", SqueezeStateToString(g_sq_state)+" "+g_sq_reason, g_sq_state==SQ_ARMED||g_sq_state==SQ_FALSE_BREAK?DB_CLR_RED:(g_sq_state==SQ_BREAKOUT_UP||g_sq_state==SQ_BREAKOUT_DN?DB_CLR_YELLOW:DB_CLR_GRAY), yb);
 
@@ -3534,6 +3599,7 @@ void OnTick(){
                         if(g_f2_trig) breason="F2";
                         else if(HTFContextBlocks(sig,1)) breason="HTF";
                         else if(EvasiveSTBlocks(sig,1)) breason="V_LINE";
+                        else if(SlowMAAngleBlocks(sig,1)) breason="SLOW_ANGLE";
                         else if(SidewayBlocks(sig,1)) breason="SIDEWAY";
                         else breason="FILTER";
                         ArmF3Recovery(sig,st,breason);
