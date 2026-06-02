@@ -1,8 +1,8 @@
 # Arsip Sesi & Handoff Gabungan — Dachi Trader EA
 
-Tanggal update terakhir: 2026-06-01
+Tanggal update terakhir: 2026-06-02
 Branch kerja: `work`
-EA aktif saat ini: `Dachi_Trader_v13_11_28.mq5`
+EA aktif saat ini: `Dachi_Trader_v13_11_30.mq5`
 Dokumen ini menggabungkan handoff baseline (`HANDOFF_DACHI_TRADER_V13_11_7_ID.md`) dengan perjalanan sesi Clean Core / Advanced Modules. **Setiap update berikutnya wajib memperbarui dokumen ini.**
 
 ---
@@ -30,7 +30,7 @@ Sumber: `HANDOFF_DACHI_TRADER_V13_11_7_ID.md`.
 
 ---
 
-## 2. Perjalanan sesi Clean Core sampai v13.11.28
+## 2. Perjalanan sesi Clean Core sampai v13.11.30
 
 ### v13.11.8 — HTF Context + Clean Core awal
 - Menambahkan HTF context gate H1/M15.
@@ -100,18 +100,32 @@ Sumber: `HANDOFF_DACHI_TRADER_V13_11_7_ID.md`.
   - Mengontrol `ENTRY_LINE`, `SL_LINE`, semua `TP*_L`, dan label terkait.
 - Logic marker dibump ke `0x13C00280`.
 
+### v13.11.29 — Remove cleanup hardening + V-Line lag analysis
+- Menambahkan `CleanupAllEAObjects()` untuk memastikan semua object dengan prefix EA (`DT13_`) dihapus saat EA remove/chart close.
+- Cleanup mencakup dashboard, license overlay, V-Line, MA ribbon, signal labels, TP/SL/Entry lines, F3 visuals, diagnostics, dan exit markers.
+- Catatan analisis V-Line terlambat menangkap bear: Evasive/V-Line memang noise-avoidance sehingga dapat terlambat pada awal impuls besar. Ide fase berikutnya: tambahkan mode opsional `V-Line Early Flip` berbasis fast-break/body ATR/SlowMA Angle, atau profile input yang lebih responsif (ATR length/multiplier lebih kecil) khusus M5 scalping.
+- Logic marker dibump ke `0x13C00290`.
+
+
+### v13.11.30 — Phase A ECI Sideways Filter
+- Menambahkan Phase A `Entropy Cluster Index (ECI)` sebagai anti-chop/sideways filter berbasis Shannon entropy dari struktur candle (body, upper wick, lower wick) dalam rolling window.
+- Input baru: `InpECI_Action`, `InpECI_Lookback`, `InpECI_ChopThreshold`, dan `InpECI_MixedThreshold`. Default `F_SOFT` agar fase awal menjadi limited/diagnostic dulu, bukan hard-block agresif.
+- Implementasi `CalcECIAt()` dan `ECITriggered()` menghitung skor entropy 0..1: `ORDER`, `MIXED`, atau `CHOP`.
+- Pipeline live dan historical sekarang memperlakukan ECI `F_HARD` sebagai block, dan `F_SOFT` sebagai limited/soft. Dashboard menampilkan row `ECI Entropy`.
+- Logic marker dibump ke `0x13C00300`.
+
 ---
 
 ## 3. Status EA aktif saat ini
 
-File aktif: `Dachi_Trader_v13_11_28.mq5`
+File aktif: `Dachi_Trader_v13_11_30.mq5`
 
 Identifier yang harus sinkron:
-- Header file: `Dachi_Trader_v13_11_28.mq5`
-- Version: `13.11.28`
-- License payload: `"ea_version":"13.11.28"`
-- Init/deinit log: `v13.11.28`
-- Logic marker: `0x13C00280`
+- Header file: `Dachi_Trader_v13_11_30.mq5`
+- Version: `13.11.30`
+- License payload: `"ea_version":"13.11.30"`
+- Init/deinit log: `v13.11.30`
+- Logic marker: `0x13C00300`
 
 ---
 
@@ -147,16 +161,20 @@ Identifier yang harus sinkron:
 
 Karena environment Codex tidak memiliki compiler MQL5, test runtime wajib di MetaEditor/MT5:
 
-1. Compile `Dachi_Trader_v13_11_28.mq5`.
+1. Compile `Dachi_Trader_v13_11_30.mq5`.
 2. Attach ke XAUUSD M5.
 3. Test visual toggles:
    - `InpShowCoreMALines=false` harus menghapus/sembunyikan EMA/LWMA lines dan fill.
    - `InpShowTPSLEntryLines=false` harus menghapus/sembunyikan ENTRY/SL/TP lines dan labels.
    - `InpShowBlockedSignals=false` harus menghapus/sembunyikan blocked labels/candle boxes.
-4. Test V-Line:
+4. Test ECI Phase A:
+   - `InpECI_Action=F_SOFT` harus menampilkan `LIMITED` saat `ECI Entropy` masuk `CHOP`, tanpa hard-block.
+   - `InpECI_Action=F_HARD` harus memblok sinyal saat skor ECI >= `InpECI_ChopThreshold`.
+   - Dashboard row `ECI Entropy` harus berubah antara `ORDER`, `MIXED`, dan `CHOP`.
+5. Test V-Line:
    - `InpVLine_TF=PERIOD_CURRENT` untuk match chart M5.
    - Band tidak flicker saat scroll/chart update.
-5. Test SlowMA Angle:
+6. Test SlowMA Angle:
    - Threshold `0`, `3`, `5` derajat.
    - BUY harus butuh angle positif sesuai threshold.
    - SELL harus butuh angle negatif sesuai threshold.
@@ -170,3 +188,5 @@ Karena environment Codex tidak memiliki compiler MQL5, test runtime wajib di Met
 - Jangan klaim compile/backtest sukses jika tidak benar-benar dijalankan di MT5/MetaEditor.
 - Jika ada fitur visual baru, sediakan toggle jika fitur itu berpotensi membuat chart terlalu ramai.
 - Jika filter baru memblok sinyal, tampilkan state/reason di dashboard agar user bisa audit.
+- Untuk ECI, kalibrasi threshold di XAUUSD M5 dulu dengan default `F_SOFT`; gunakan `F_HARD` hanya setelah skor CHOP terbukti akurat.
+- Saat analisis V-Line lag, jangan langsung mengganti logic utama; pertimbangkan mode opsional early-flip agar karakter noise-avoidance tetap bisa dipertahankan.
