@@ -2,7 +2,7 @@
 
 Tanggal update terakhir: 2026-06-02
 Branch kerja: `work`
-EA aktif saat ini: `Dachi_Trader_v13_11_30.mq5`
+EA aktif saat ini: `Dachi_Trader_v13_11_32.mq5`
 Dokumen ini menggabungkan handoff baseline (`HANDOFF_DACHI_TRADER_V13_11_7_ID.md`) dengan perjalanan sesi Clean Core / Advanced Modules. **Setiap update berikutnya wajib memperbarui dokumen ini.**
 
 ---
@@ -30,7 +30,7 @@ Sumber: `HANDOFF_DACHI_TRADER_V13_11_7_ID.md`.
 
 ---
 
-## 2. Perjalanan sesi Clean Core sampai v13.11.30
+## 2. Perjalanan sesi Clean Core sampai v13.11.32
 
 ### v13.11.8 — HTF Context + Clean Core awal
 - Menambahkan HTF context gate H1/M15.
@@ -114,18 +114,32 @@ Sumber: `HANDOFF_DACHI_TRADER_V13_11_7_ID.md`.
 - Pipeline live dan historical sekarang memperlakukan ECI `F_HARD` sebagai block, dan `F_SOFT` sebagai limited/soft. Dashboard menampilkan row `ECI Entropy`.
 - Logic marker dibump ke `0x13C00300`.
 
+
+### v13.11.31 — Stale BLOCKED label repaint fix
+- Memperbaiki penyebab label `! BLOCKED` tetap muncul walaupun filter sudah OFF: `DrawSignalLabel()` sebelumnya menolak repaint label BLOCKED lama menjadi VALID/LIMITED.
+- Sekarang jika timestamp yang sama dievaluasi ulang sebagai non-BLOCKED, object BLOCKED lama dihapus dulu lalu label baru digambar sesuai status terbaru.
+- Logic marker dibump ke `0x13C00310`.
+
+
+### v13.11.32 — ECI calibration: less strict on healthy trends
+- Mengkalibrasi ulang ECI karena entropy murni terlalu ketat dan membuat mayoritas sinyal menjadi `LIMITED/BLOCKED` pada M1/M5.
+- `CalcECIAt()` sekarang memakai composite chop score: Shannon entropy + directional efficiency + noisy candle ratio + candle-direction alternation.
+- Trend yang efisien/ordered tidak lagi otomatis dianggap CHOP hanya karena bentuk candle bervariasi. Dashboard ECI sekarang menampilkan score dan efficiency (`E`).
+- Default threshold dinaikkan ke `InpECI_ChopThreshold=0.72` dan `InpECI_MixedThreshold=0.58`.
+- Logic marker dibump ke `0x13C00320`.
+
 ---
 
 ## 3. Status EA aktif saat ini
 
-File aktif: `Dachi_Trader_v13_11_30.mq5`
+File aktif: `Dachi_Trader_v13_11_32.mq5`
 
 Identifier yang harus sinkron:
-- Header file: `Dachi_Trader_v13_11_30.mq5`
-- Version: `13.11.30`
-- License payload: `"ea_version":"13.11.30"`
-- Init/deinit log: `v13.11.30`
-- Logic marker: `0x13C00300`
+- Header file: `Dachi_Trader_v13_11_32.mq5`
+- Version: `13.11.32`
+- License payload: `"ea_version":"13.11.32"`
+- Init/deinit log: `v13.11.32`
+- Logic marker: `0x13C00320`
 
 ---
 
@@ -161,20 +175,24 @@ Identifier yang harus sinkron:
 
 Karena environment Codex tidak memiliki compiler MQL5, test runtime wajib di MetaEditor/MT5:
 
-1. Compile `Dachi_Trader_v13_11_30.mq5`.
+1. Compile `Dachi_Trader_v13_11_32.mq5`.
 2. Attach ke XAUUSD M5.
 3. Test visual toggles:
    - `InpShowCoreMALines=false` harus menghapus/sembunyikan EMA/LWMA lines dan fill.
    - `InpShowTPSLEntryLines=false` harus menghapus/sembunyikan ENTRY/SL/TP lines dan labels.
    - `InpShowBlockedSignals=false` harus menghapus/sembunyikan blocked labels/candle boxes.
-4. Test ECI Phase A:
-   - `InpECI_Action=F_SOFT` harus menampilkan `LIMITED` saat `ECI Entropy` masuk `CHOP`, tanpa hard-block.
-   - `InpECI_Action=F_HARD` harus memblok sinyal saat skor ECI >= `InpECI_ChopThreshold`.
-   - Dashboard row `ECI Entropy` harus berubah antara `ORDER`, `MIXED`, dan `CHOP`.
-5. Test V-Line:
+4. Test stale BLOCKED repaint:
+   - Matikan filter/gate, reload EA, lalu pastikan label lama `! BLOCKED` berubah menjadi BUY/SELL/LIMITED sesuai evaluasi terbaru.
+   - Jika `InpShowBlockedSignals=false`, object `SIG_B_*/SIG_S_*` blocked lama harus hilang.
+5. Test ECI Phase A:
+   - `InpECI_Action=F_SOFT` hanya boleh menampilkan `LIMITED` saat `ECI Entropy` benar-benar `CHOP`, bukan pada trend efisien.
+   - `InpECI_Action=F_HARD` harus memblok sinyal saat composite score ECI >= `InpECI_ChopThreshold`.
+   - Dashboard row `ECI Entropy` harus berubah antara `ORDER`, `MIXED`, dan `CHOP`, serta menampilkan efficiency `E`.
+   - Jika masih terlalu ketat di M1, naikkan `InpECI_ChopThreshold` bertahap ke `0.76–0.80` atau gunakan `F_OFF` untuk diagnostic saja.
+6. Test V-Line:
    - `InpVLine_TF=PERIOD_CURRENT` untuk match chart M5.
    - Band tidak flicker saat scroll/chart update.
-6. Test SlowMA Angle:
+7. Test SlowMA Angle:
    - Threshold `0`, `3`, `5` derajat.
    - BUY harus butuh angle positif sesuai threshold.
    - SELL harus butuh angle negatif sesuai threshold.
