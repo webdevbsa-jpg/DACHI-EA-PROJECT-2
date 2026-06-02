@@ -1,10 +1,10 @@
-// Dachi_Trader_v13_11_29.mq5 — Expert Advisor
-// Version: 13.11.29
+// Dachi_Trader_v13_11_30.mq5 — Expert Advisor
+// Version: 13.11.30
 // Clean Core branch: simplified runtime pipeline (F2 + HTF gate).
 
 #property copyright   "Daniel @danieljulyanto"
-#property version     "13.11.29"
-#property description "Dachi Trader v13.11.29 — Expert Advisor"
+#property version     "13.11.30"
+#property description "Dachi Trader v13.11.30 — Expert Advisor"
 
 #define MAX_TP            30
 #define VOL_AVG_PERIOD    20
@@ -66,6 +66,12 @@ input int    InpATR_Period      = 14;
 input group "=== Visual Slow MA Angle Guard ==="
 input bool   InpUseSlowMAAngleGuard   = true;
 input double InpSlowMA_MinAngleDeg    = 0.0;    // BUY needs >= +deg, SELL needs <= -deg; 0 allows flat in signal direction
+
+input group "=== Entropy Cluster Index (ECI) Sideways Filter ==="
+input ENUM_FILTER_ACTION InpECI_Action         = F_SOFT; // OFF/SOFT/HARD anti-chop entropy gate
+input int                InpECI_Lookback       = 18;     // rolling candle-structure window
+input double             InpECI_ChopThreshold  = 0.68;   // >= threshold means random/choppy
+input double             InpECI_MixedThreshold = 0.55;   // dashboard MIXED/ORDERED boundary
 
 input group "=== Clean Core HTF Context (H1 Bias + M15 Setup) ==="
 input bool   InpUseH1Bias         = true;
@@ -492,6 +498,7 @@ string g_last_decision="---"; // "V","S","B","D"
 // === F0 dashboard fix ===
 double g_last_signal_gap_pts=0;
 double g_slowma_angle_deg=0.0; bool g_slowma_angle_block=false; string g_slowma_angle_state="OFF";
+double g_eci_score=0.0; bool g_eci_trig=false; string g_eci_state="OFF";
 ENUM_SQUEEZE_STATE g_sq_state = SQ_NONE;
 double g_sq_range_high = 0.0;
 double g_sq_range_low = 0.0;
@@ -652,7 +659,7 @@ bool LIC_VerifyOnce(){
     }
     string url = InpLicense_URL + "/backend/api/license/verify.php";
     long account = AccountInfoInteger(ACCOUNT_LOGIN);
-    string body = StringFormat("{\"account_number\":\"%I64u\",\"ea_version\":\"13.11.29\"}", (ulong)account);
+    string body = StringFormat("{\"account_number\":\"%I64u\",\"ea_version\":\"13.11.30\"}", (ulong)account);
     char post[]; StringToCharArray(body, post, 0, StringLen(body));
     char result[]; string headers="Content-Type: application/json\r\n"; string resp_headers;
     int timeout = 5000;
@@ -1058,6 +1065,7 @@ int OnInit(){
     g_retest_armed=false;g_retest_dir=0;g_retest_counter=0;g_retest_seen_pullback=false;
     g_pipe_hard=false;g_pipe_soft=false;g_last_decision="---";
     g_last_signal_gap_pts=0;g_slowma_angle_deg=0.0;g_slowma_angle_block=false;g_slowma_angle_state="OFF";
+    g_eci_score=0.0;g_eci_trig=false;g_eci_state="OFF";
     g_f3_armed=false;g_f3_dir=0;g_f3_counter=0;g_f3_break_high=0;g_f3_break_low=0;g_f3_time=0;g_f3_reason="---";
     g_f3_fire_time=0;g_f3_fire_cross_px=0;g_f3_fire_atr=0;g_f3_fire_dir=0;
     g_pe_bep_armed=false;g_pe_entry_time=0;
@@ -1160,7 +1168,7 @@ int OnInit(){
     ChartSetInteger(0,CHART_SHOW_GRID,false);ChartSetInteger(0,CHART_MODE,CHART_CANDLES);
 
     Print("==============================================================");
-    Print("[INIT] Dachi Trader v13.11.29 | ",_Symbol," ",EnumToString(_Period),
+    Print("[INIT] Dachi Trader v13.11.30 | ",_Symbol," ",EnumToString(_Period),
           " | Mode=",(InpIndicatorOnly?"INDICATOR":"EA ACTIVE"));
     string slmm=(InpSlowMA_Method==MODE_EMA?"EMA":InpSlowMA_Method==MODE_SMMA?"SMMA":InpSlowMA_Method==MODE_LWMA?"LWMA":"SMA");
     Print("[INIT] Core: EMA",InpEMA_Fast,"/",slmm,InpSMA_Slow," | ATR",InpATR_Period);
@@ -1215,7 +1223,7 @@ void OnDeinit(const int reason){
     if(h_regime_ema_fast!=INVALID_HANDLE)IndicatorRelease(h_regime_ema_fast);
     if(h_regime_ema_slow!=INVALID_HANDLE)IndicatorRelease(h_regime_ema_slow);
     LIC_ClearOverlay();
-    Print("[DEINIT] Dachi v13.11.29 removed");
+    Print("[DEINIT] Dachi v13.11.30 removed");
 }
 
 void OnTimer(){
@@ -1295,6 +1303,10 @@ uint ComputeFilterHash(){
     h = (h ^ (uint)InpSlowMA_Method)       * 16777619;
     h = (h ^ (uint)(InpUseSlowMAAngleGuard?1:0)) * 16777619;
     h = (h ^ (uint)(int)(InpSlowMA_MinAngleDeg*100)) * 16777619;
+    h = (h ^ (uint)InpECI_Action)          * 16777619;
+    h = (h ^ (uint)InpECI_Lookback)        * 16777619;
+    h = (h ^ (uint)(int)(InpECI_ChopThreshold*100)) * 16777619;
+    h = (h ^ (uint)(int)(InpECI_MixedThreshold*100)) * 16777619;
     h = (h ^ (uint)InpF2_Action)           * 16777619;
     h = (h ^ (uint)(int)(InpF2_MaxDistATR*100))  * 16777619;
 
@@ -1341,7 +1353,7 @@ uint ComputeFilterHash(){
     h = (h ^ (uint)(int)(InpSQ_SellCloseLocMax*100)) * 16777619;
     h = (h ^ (uint)(int)(InpSQ_SpikeRatioBlock*100)) * 16777619;
 
-    h = (h ^ (uint)0x13C00290)             * 16777619;   // logic version marker
+    h = (h ^ (uint)0x13C00300)             * 16777619;   // logic version marker
     return h;
 }
 
@@ -1906,6 +1918,63 @@ void DrawEvasiveSTVisual(){
     }
 }
 
+
+bool CalcECIAt(int idx, double &score, string &state){
+    score=0.0; state="ERR";
+    int look=MathMax(5, InpECI_Lookback);
+    int bars=Bars(_Symbol,_Period);
+    if(idx<0 || bars <= idx+look+1){ state="NO_DATA"; return false; }
+
+    int buckets[7];
+    ArrayInitialize(buckets,0);
+    int total=0;
+    for(int i=idx; i<idx+look; i++){
+        double o=iOpen(_Symbol,_Period,i), h=iHigh(_Symbol,_Period,i), l=iLow(_Symbol,_Period,i), c=iClose(_Symbol,_Period,i);
+        double range=h-l;
+        if(range<=_Point*0.1) continue;
+        double body=MathAbs(c-o);
+        double upper=h-MathMax(o,c);
+        double lower=MathMin(o,c)-l;
+        double body_ratio=body/range;
+        double upper_ratio=upper/range;
+        double lower_ratio=lower/range;
+        int bucket=6; // neutral / weak-bear cluster
+
+        if(body_ratio>=0.55) bucket=(c>=o?0:1);                            // ordered bull/bear body
+        else if(upper_ratio>=0.45 && upper_ratio>lower_ratio*1.20) bucket=2; // upper rejection
+        else if(lower_ratio>=0.45 && lower_ratio>upper_ratio*1.20) bucket=3; // lower rejection
+        else if(body_ratio<=0.20) bucket=4;                                  // doji / wick-dominant noise
+        else bucket=(c>=o?5:6);                                               // weak bull / weak bear
+
+        buckets[bucket]++;
+        total++;
+    }
+    if(total<5){ state="NO_DATA"; return false; }
+
+    double entropy=0.0;
+    for(int b=0; b<7; b++){
+        if(buckets[b]<=0) continue;
+        double p=(double)buckets[b]/(double)total;
+        entropy -= p*MathLog(p);
+    }
+    score = entropy / MathLog(7.0); // normalized 0..1, high=random/chop, low=ordered
+
+    if(score>=InpECI_ChopThreshold) state="CHOP "+DoubleToString(score,2);
+    else if(score>=InpECI_MixedThreshold) state="MIXED "+DoubleToString(score,2);
+    else state="ORDER "+DoubleToString(score,2);
+    return true;
+}
+
+bool ECITriggered(int idx){
+    g_eci_score=0.0;
+    g_eci_trig=false;
+    g_eci_state=(InpECI_Action==F_OFF?"OFF":"ERR");
+    if(InpECI_Action==F_OFF) return false;
+    if(!CalcECIAt(idx,g_eci_score,g_eci_state)) return false;
+    g_eci_trig=(g_eci_score>=InpECI_ChopThreshold);
+    return g_eci_trig;
+}
+
 bool SidewayBlocks(int sig, int idx){
     if(!InpUseSidewayGuard) return false;
     double e0[1], e4[1], s0[1];
@@ -2095,6 +2164,9 @@ bool EvaluatePipeline(int sig){
     bool h_htf = HTFContextBlocks(sig, 1);
     bool h_est = EvasiveSTBlocks(sig, 1);
     bool h_slow_angle = SlowMAAngleBlocks(sig, 1);
+    bool t_eci = ECITriggered(1);
+    bool h_eci = (InpECI_Action==F_HARD && t_eci);
+    bool s_eci = (InpECI_Action==F_SOFT && t_eci);
     bool h_sideway = SidewayBlocks(sig, 1);
     string atr_state="";
     ENUM_FILTER_DECISION atr_dec = EvalATRHealthAt(1, atr_state);
@@ -2104,8 +2176,8 @@ bool EvaluatePipeline(int sig){
     bool s_atr = (atr_dec==DEC_LIMITED);
     bool h_sq = (sq_dec==DEC_BLOCKED);
     bool s_sq = (sq_dec==DEC_LIMITED);
-    g_pipe_filter_hard = h_f2 || h_htf || h_est || h_slow_angle || h_sideway || h_atr || h_sq;
-    g_pipe_soft = s_atr || s_sq;
+    g_pipe_filter_hard = h_f2 || h_htf || h_est || h_slow_angle || h_eci || h_sideway || h_atr || h_sq;
+    g_pipe_soft = s_eci || s_atr || s_sq;
     g_pipe_hard = g_pipe_filter_hard;
     return !g_pipe_hard;
 }
@@ -2118,6 +2190,9 @@ bool EvaluatePipelineAt(int idx, int sig, bool &out_hard, bool &out_soft){
     if(HTFContextBlocks(sig, idx)) out_hard=true;
     if(EvasiveSTBlocks(sig, idx)) out_hard=true;
     if(SlowMAAngleBlocks(sig, idx)) out_hard=true;
+    bool t_eci=ECITriggered(idx);
+    if(t_eci && InpECI_Action==F_HARD) out_hard=true;
+    if(t_eci && InpECI_Action==F_SOFT) out_soft=true;
     if(SidewayBlocks(sig, idx)) out_hard=true;
     string atr_state="";
     ENUM_FILTER_DECISION atr_dec = EvalATRHealthAt(idx, atr_state);
@@ -3414,12 +3489,15 @@ void DrawDashboard(bool force){
     bool htf_block = HTFContextBlocks(dash_sig, 1);
     bool est_block = EvasiveSTBlocks(dash_sig,1);
     bool slow_angle_block = SlowMAAngleBlocks(dash_sig,1);
+    bool eci_trig = ECITriggered(1);
+    bool eci_block = (InpECI_Action==F_HARD && eci_trig);
     bool side_block = SidewayBlocks(dash_sig,1);
     string atr_state=""; ENUM_FILTER_DECISION atr_dec=EvalATRHealthAt(1,atr_state);
     string sq_state="", sq_reason=""; ENUM_FILTER_DECISION sq_dec=EvalSqueezeGuard(dash_sig,1,sq_state,sq_reason);
     if(htf_block) n_hard++;
     if(est_block) n_hard++;
     if(slow_angle_block) n_hard++;
+    if(eci_block) n_hard++;
     if(side_block) n_hard++;
     if(atr_dec==DEC_BLOCKED) n_hard++;
     if(sq_dec==DEC_BLOCKED) n_hard++;
@@ -3434,6 +3512,7 @@ void DrawDashboard(bool force){
     DrawDR("HTFC",row++,"HTF Config", htfv, DB_CLR_CYAN, yb);
     DrawDR("EST",row++,"V-Line", (InpUseVLineGuard?(g_est_state+" "+EnumToString(InpVLine_TF)):"OFF"), !InpUseVLineGuard?DB_CLR_GRAY:(est_block?DB_CLR_RED:(g_est_dir>0?DB_CLR_GREEN:DB_CLR_ORANGE)), yb);
     DrawDR("SANG",row++,"SlowMA Angle", InpUseSlowMAAngleGuard?g_slowma_angle_state:"OFF", !InpUseSlowMAAngleGuard?DB_CLR_GRAY:(slow_angle_block?DB_CLR_RED:DB_CLR_GREEN), yb);
+    DrawFilterRow("ECI",row++,"ECI Entropy",InpECI_Action,eci_trig,g_eci_state,yb);
     DrawDR("ATRH",row++,"ATR Health", InpUseATRHealthGuard?atr_state:"OFF", !InpUseATRHealthGuard?DB_CLR_GRAY:(atr_dec==DEC_BLOCKED?DB_CLR_RED:(atr_dec==DEC_LIMITED?DB_CLR_YELLOW:DB_CLR_GREEN)), yb);
     DrawDR("SQ",row++,"Squeeze", SqueezeStateToString(g_sq_state)+" "+g_sq_reason, g_sq_state==SQ_ARMED||g_sq_state==SQ_FALSE_BREAK?DB_CLR_RED:(g_sq_state==SQ_BREAKOUT_UP||g_sq_state==SQ_BREAKOUT_DN?DB_CLR_YELLOW:DB_CLR_GRAY), yb);
 
@@ -3638,6 +3717,7 @@ void OnTick(){
                         else if(HTFContextBlocks(sig,1)) breason="HTF";
                         else if(EvasiveSTBlocks(sig,1)) breason="V_LINE";
                         else if(SlowMAAngleBlocks(sig,1)) breason="SLOW_ANGLE";
+                        else if(ECITriggered(1) && InpECI_Action==F_HARD) breason="ECI";
                         else if(SidewayBlocks(sig,1)) breason="SIDEWAY";
                         else breason="FILTER";
                         ArmF3Recovery(sig,st,breason);
