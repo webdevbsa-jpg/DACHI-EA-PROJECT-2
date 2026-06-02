@@ -2,7 +2,7 @@
 
 Tanggal update terakhir: 2026-06-02
 Branch kerja: `work`
-EA aktif saat ini: `Dachi_Trader_v13_11_32.mq5`
+EA aktif saat ini: `Dachi_Trader_v13_11_33.mq5`
 Dokumen ini menggabungkan handoff baseline (`HANDOFF_DACHI_TRADER_V13_11_7_ID.md`) dengan perjalanan sesi Clean Core / Advanced Modules. **Setiap update berikutnya wajib memperbarui dokumen ini.**
 
 ---
@@ -30,7 +30,7 @@ Sumber: `HANDOFF_DACHI_TRADER_V13_11_7_ID.md`.
 
 ---
 
-## 2. Perjalanan sesi Clean Core sampai v13.11.32
+## 2. Perjalanan sesi Clean Core sampai v13.11.33
 
 ### v13.11.8 — HTF Context + Clean Core awal
 - Menambahkan HTF context gate H1/M15.
@@ -121,25 +121,32 @@ Sumber: `HANDOFF_DACHI_TRADER_V13_11_7_ID.md`.
 - Logic marker dibump ke `0x13C00310`.
 
 
-### v13.11.32 — ECI calibration: less strict on healthy trends
-- Mengkalibrasi ulang ECI karena entropy murni terlalu ketat dan membuat mayoritas sinyal menjadi `LIMITED/BLOCKED` pada M1/M5.
-- `CalcECIAt()` sekarang memakai composite chop score: Shannon entropy + directional efficiency + noisy candle ratio + candle-direction alternation.
-- Trend yang efisien/ordered tidak lagi otomatis dianggap CHOP hanya karena bentuk candle bervariasi. Dashboard ECI sekarang menampilkan score dan efficiency (`E`).
-- Default threshold dinaikkan ke `InpECI_ChopThreshold=0.72` dan `InpECI_MixedThreshold=0.58`.
+### v13.11.32 — ECI calibration: reduce over-filtering
+- Menurunkan agresivitas ECI karena threshold entropy murni membuat hampir semua sinyal menjadi `LIMITED/BLOCKED` pada XAUUSD M1/M5.
+- `CHOP` sekarang tidak hanya membutuhkan entropy tinggi, tetapi juga harus directionless dan body lemah: `InpECI_DirectionalBalanceMax` + `InpECI_BodyDominanceMax`.
+- Default ECI dibuat lebih longgar: `InpECI_ChopThreshold=0.82`, `InpECI_MixedThreshold=0.62`.
+- Dashboard dapat menampilkan `TREND` ketika entropy tinggi tetapi struktur candle masih punya directional bias/body dominance, sehingga sinyal tidak otomatis limited.
 - Logic marker dibump ke `0x13C00320`.
+
+
+### v13.11.33 — ECI v2 visibility + remove-cleanup hardening
+- Memperjelas UI bahwa ECI yang aktif adalah `ECI v2` lewat input group dan dashboard row `ECI v2 Entropy`.
+- Memperkuat cleanup object EA: `CleanupAllEAObjects()` sekarang mencari current/legacy prefix `DT13_` dan `DT13`, melakukan multi-pass cleanup sampai tidak ada object EA tersisa, dan mengembalikan jumlah object yang dihapus untuk log deinit.
+- `OnDeinit()` sekarang menjalankan cleanup pada semua reason (remove, chart close, parameter change, template/timeframe reload), lalu cleanup ulang setelah indicator handle release dan `ChartRedraw()`. Ini mencegah object stale tertinggal ketika user remove/reload EA.
+- Logic marker dibump ke `0x13C00330`.
 
 ---
 
 ## 3. Status EA aktif saat ini
 
-File aktif: `Dachi_Trader_v13_11_32.mq5`
+File aktif: `Dachi_Trader_v13_11_33.mq5`
 
 Identifier yang harus sinkron:
-- Header file: `Dachi_Trader_v13_11_32.mq5`
-- Version: `13.11.32`
-- License payload: `"ea_version":"13.11.32"`
-- Init/deinit log: `v13.11.32`
-- Logic marker: `0x13C00320`
+- Header file: `Dachi_Trader_v13_11_33.mq5`
+- Version: `13.11.33`
+- License payload: `"ea_version":"13.11.33"`
+- Init/deinit log: `v13.11.33`
+- Logic marker: `0x13C00330`
 
 ---
 
@@ -175,24 +182,27 @@ Identifier yang harus sinkron:
 
 Karena environment Codex tidak memiliki compiler MQL5, test runtime wajib di MetaEditor/MT5:
 
-1. Compile `Dachi_Trader_v13_11_32.mq5`.
+1. Compile `Dachi_Trader_v13_11_33.mq5`.
 2. Attach ke XAUUSD M5.
-3. Test visual toggles:
+3. Test remove cleanup:
+   - Attach EA, aktifkan visual V-Line/MA/TP-SL/dashboard, lalu remove EA.
+   - Semua object prefix `DT13`/`DT13_` harus hilang dari chart.
+   - Journal harus mencetak `cleanup_deleted=...` pada `[DEINIT]`.
+4. Test visual toggles:
    - `InpShowCoreMALines=false` harus menghapus/sembunyikan EMA/LWMA lines dan fill.
    - `InpShowTPSLEntryLines=false` harus menghapus/sembunyikan ENTRY/SL/TP lines dan labels.
    - `InpShowBlockedSignals=false` harus menghapus/sembunyikan blocked labels/candle boxes.
-4. Test stale BLOCKED repaint:
+5. Test stale BLOCKED repaint:
    - Matikan filter/gate, reload EA, lalu pastikan label lama `! BLOCKED` berubah menjadi BUY/SELL/LIMITED sesuai evaluasi terbaru.
    - Jika `InpShowBlockedSignals=false`, object `SIG_B_*/SIG_S_*` blocked lama harus hilang.
-5. Test ECI Phase A:
-   - `InpECI_Action=F_SOFT` hanya boleh menampilkan `LIMITED` saat `ECI Entropy` benar-benar `CHOP`, bukan pada trend efisien.
-   - `InpECI_Action=F_HARD` harus memblok sinyal saat composite score ECI >= `InpECI_ChopThreshold`.
-   - Dashboard row `ECI Entropy` harus berubah antara `ORDER`, `MIXED`, dan `CHOP`, serta menampilkan efficiency `E`.
-   - Jika masih terlalu ketat di M1, naikkan `InpECI_ChopThreshold` bertahap ke `0.76–0.80` atau gunakan `F_OFF` untuk diagnostic saja.
-6. Test V-Line:
+6. Test ECI Phase A:
+   - `InpECI_Action=F_SOFT` harus menampilkan `LIMITED` saat `ECI Entropy` masuk `CHOP`, tanpa hard-block.
+   - `InpECI_Action=F_HARD` harus memblok sinyal saat skor ECI >= `InpECI_ChopThreshold`.
+   - Dashboard row `ECI v2 Entropy` harus berubah antara `ORDER`, `MIXED`, `TREND`, dan `CHOP`.
+7. Test V-Line:
    - `InpVLine_TF=PERIOD_CURRENT` untuk match chart M5.
    - Band tidak flicker saat scroll/chart update.
-7. Test SlowMA Angle:
+8. Test SlowMA Angle:
    - Threshold `0`, `3`, `5` derajat.
    - BUY harus butuh angle positif sesuai threshold.
    - SELL harus butuh angle negatif sesuai threshold.
@@ -206,5 +216,5 @@ Karena environment Codex tidak memiliki compiler MQL5, test runtime wajib di Met
 - Jangan klaim compile/backtest sukses jika tidak benar-benar dijalankan di MT5/MetaEditor.
 - Jika ada fitur visual baru, sediakan toggle jika fitur itu berpotensi membuat chart terlalu ramai.
 - Jika filter baru memblok sinyal, tampilkan state/reason di dashboard agar user bisa audit.
-- Untuk ECI, kalibrasi threshold di XAUUSD M5 dulu dengan default `F_SOFT`; gunakan `F_HARD` hanya setelah skor CHOP terbukti akurat.
+- Untuk ECI, kalibrasi threshold di XAUUSD M5 dulu dengan default `F_SOFT`; gunakan `F_HARD` hanya setelah skor CHOP terbukti akurat. Untuk v13.11.32, CHOP harus memenuhi entropy tinggi + directional balance rendah + body dominance rendah.
 - Saat analisis V-Line lag, jangan langsung mengganti logic utama; pertimbangkan mode opsional early-flip agar karakter noise-avoidance tetap bisa dipertahankan.
