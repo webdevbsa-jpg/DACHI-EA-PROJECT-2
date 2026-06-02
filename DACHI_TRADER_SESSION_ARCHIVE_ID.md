@@ -2,7 +2,7 @@
 
 Tanggal update terakhir: 2026-06-02
 Branch kerja: `work`
-EA aktif saat ini: `Dachi_Trader_v13_11_33.mq5`
+EA aktif saat ini: `Dachi_Trader_v13_11_34.mq5`
 Dokumen ini menggabungkan handoff baseline (`HANDOFF_DACHI_TRADER_V13_11_7_ID.md`) dengan perjalanan sesi Clean Core / Advanced Modules. **Setiap update berikutnya wajib memperbarui dokumen ini.**
 
 ---
@@ -30,7 +30,7 @@ Sumber: `HANDOFF_DACHI_TRADER_V13_11_7_ID.md`.
 
 ---
 
-## 2. Perjalanan sesi Clean Core sampai v13.11.33
+## 2. Perjalanan sesi Clean Core sampai v13.11.34
 
 ### v13.11.8 — HTF Context + Clean Core awal
 - Menambahkan HTF context gate H1/M15.
@@ -135,18 +135,27 @@ Sumber: `HANDOFF_DACHI_TRADER_V13_11_7_ID.md`.
 - `OnDeinit()` sekarang menjalankan cleanup pada semua reason (remove, chart close, parameter change, template/timeframe reload), lalu cleanup ulang setelah indicator handle release dan `ChartRedraw()`. Ini mencegah object stale tertinggal ketika user remove/reload EA.
 - Logic marker dibump ke `0x13C00330`.
 
+
+### v13.11.34 — Blocked Retest Re-entry + safer remove cleanup
+- Menambahkan sistem `Blocked Signal Retest Re-entry` untuk menangkap ulang sinyal bagus yang awalnya hard-blocked. Setelah block, EA menunggu retest ke MA band lalu entry ulang jika close kembali searah signal.
+- Re-entry memakai konfirmasi native MT5 ADX DI: BUY butuh `DI+ > DI- + InpBRE_DIMargin`, SELL butuh `DI- > DI+ + InpBRE_DIMargin`. Input baru: `InpUseBlockedRetestReentry`, `InpBRE_Bars`, `InpBRE_RetestBufferATR`, `InpBRE_RequireMAAlign`, `InpBRE_RequireDIDirection`, `InpBRE_DIMargin`, dan `InpBRE_RequireSignalCandle`.
+- Menambahkan dashboard row `Blocked ReEntry` untuk melihat status arm/wait/reason.
+- Mengubah cleanup remove agar lebih aman dari `abnormal termination`: `CleanupAllEAObjects()` kini memakai satu panggilan sinkron `ObjectsDeleteAll(0,"DT13",-1,-1)` daripada ribuan `ObjectDelete()` multi-pass. Ini mengikuti perilaku MQL5 bahwa `ObjectsDeleteAll` menghapus object berdasarkan prefix dan mengembalikan jumlah object terhapus.
+- Menambahkan startup self-clean (`[INIT-CLEANUP]`) agar jika MT5 melakukan abnormal termination sebelum `OnDeinit()` selesai, attach berikutnya tetap menghapus sisa object lama sebelum EA menggambar ulang.
+- Logic marker dibump ke `0x13C00340`.
+
 ---
 
 ## 3. Status EA aktif saat ini
 
-File aktif: `Dachi_Trader_v13_11_33.mq5`
+File aktif: `Dachi_Trader_v13_11_34.mq5`
 
 Identifier yang harus sinkron:
-- Header file: `Dachi_Trader_v13_11_33.mq5`
-- Version: `13.11.33`
-- License payload: `"ea_version":"13.11.33"`
-- Init/deinit log: `v13.11.33`
-- Logic marker: `0x13C00330`
+- Header file: `Dachi_Trader_v13_11_34.mq5`
+- Version: `13.11.34`
+- License payload: `"ea_version":"13.11.34"`
+- Init/deinit log: `v13.11.34`
+- Logic marker: `0x13C00340`
 
 ---
 
@@ -182,27 +191,31 @@ Identifier yang harus sinkron:
 
 Karena environment Codex tidak memiliki compiler MQL5, test runtime wajib di MetaEditor/MT5:
 
-1. Compile `Dachi_Trader_v13_11_33.mq5`.
+1. Compile `Dachi_Trader_v13_11_34.mq5`.
 2. Attach ke XAUUSD M5.
-3. Test remove cleanup:
+3. Test Blocked Retest Re-entry:
+   - Buat kondisi sinyal hard-blocked, lalu tunggu pullback/retest ke MA band.
+   - BUY re-entry hanya boleh fire jika `DI+ > DI- + InpBRE_DIMargin`; SELL jika `DI- > DI+ + InpBRE_DIMargin`.
+   - Dashboard `Blocked ReEntry` harus menampilkan direction, countdown bars, dan reason saat armed.
+4. Test remove cleanup:
    - Attach EA, aktifkan visual V-Line/MA/TP-SL/dashboard, lalu remove EA.
    - Semua object prefix `DT13`/`DT13_` harus hilang dari chart.
    - Journal harus mencetak `cleanup_deleted=...` pada `[DEINIT]`.
-4. Test visual toggles:
+5. Test visual toggles:
    - `InpShowCoreMALines=false` harus menghapus/sembunyikan EMA/LWMA lines dan fill.
    - `InpShowTPSLEntryLines=false` harus menghapus/sembunyikan ENTRY/SL/TP lines dan labels.
    - `InpShowBlockedSignals=false` harus menghapus/sembunyikan blocked labels/candle boxes.
-5. Test stale BLOCKED repaint:
+6. Test stale BLOCKED repaint:
    - Matikan filter/gate, reload EA, lalu pastikan label lama `! BLOCKED` berubah menjadi BUY/SELL/LIMITED sesuai evaluasi terbaru.
    - Jika `InpShowBlockedSignals=false`, object `SIG_B_*/SIG_S_*` blocked lama harus hilang.
-6. Test ECI Phase A:
+7. Test ECI Phase A:
    - `InpECI_Action=F_SOFT` harus menampilkan `LIMITED` saat `ECI Entropy` masuk `CHOP`, tanpa hard-block.
    - `InpECI_Action=F_HARD` harus memblok sinyal saat skor ECI >= `InpECI_ChopThreshold`.
    - Dashboard row `ECI v2 Entropy` harus berubah antara `ORDER`, `MIXED`, `TREND`, dan `CHOP`.
-7. Test V-Line:
+8. Test V-Line:
    - `InpVLine_TF=PERIOD_CURRENT` untuk match chart M5.
    - Band tidak flicker saat scroll/chart update.
-8. Test SlowMA Angle:
+9. Test SlowMA Angle:
    - Threshold `0`, `3`, `5` derajat.
    - BUY harus butuh angle positif sesuai threshold.
    - SELL harus butuh angle negatif sesuai threshold.
