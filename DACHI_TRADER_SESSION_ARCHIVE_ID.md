@@ -2,7 +2,7 @@
 
 Tanggal update terakhir: 2026-06-02
 Branch kerja: `work`
-EA aktif saat ini: `Dachi_Trader_v13_11_34.mq5`
+EA aktif saat ini: `Dachi_Trader_v13_11_35.mq5`
 Dokumen ini menggabungkan handoff baseline (`HANDOFF_DACHI_TRADER_V13_11_7_ID.md`) dengan perjalanan sesi Clean Core / Advanced Modules. **Setiap update berikutnya wajib memperbarui dokumen ini.**
 
 ---
@@ -30,7 +30,7 @@ Sumber: `HANDOFF_DACHI_TRADER_V13_11_7_ID.md`.
 
 ---
 
-## 2. Perjalanan sesi Clean Core sampai v13.11.34
+## 2. Perjalanan sesi Clean Core sampai v13.11.35
 
 ### v13.11.8 — HTF Context + Clean Core awal
 - Menambahkan HTF context gate H1/M15.
@@ -144,18 +144,24 @@ Sumber: `HANDOFF_DACHI_TRADER_V13_11_7_ID.md`.
 - Menambahkan startup self-clean (`[INIT-CLEANUP]`) agar jika MT5 melakukan abnormal termination sebelum `OnDeinit()` selesai, attach berikutnya tetap menghapus sisa object lama sebelum EA menggambar ulang.
 - Logic marker dibump ke `0x13C00340`.
 
+### v13.11.35 — Historical BRE labels + safer deinit cleanup v2
+- Label re-entry sekarang tampil sebagai `RE-ENTRY BUY` / `RE-ENTRY SELL` dengan font warna krem agar berbeda dari BUY/SELL normal, LIMITED, dan BLOCKED.
+- `ScanHistory()` sekarang mensimulasikan Blocked Retest Re-entry secara historis sehingga efektivitas fitur dapat dievaluasi dari chart lama, bukan hanya live tick.
+- Cleanup remove dibuat lebih defensif lagi: object EA dihapus per tipe object pada main chart, tanpa `ChartRedraw()` paksa di `OnDeinit()`, agar mengurangi risiko `abnormal termination` saat object historical visual sangat banyak.
+- Logic marker dibump ke `0x13C00350`.
+
 ---
 
 ## 3. Status EA aktif saat ini
 
-File aktif: `Dachi_Trader_v13_11_34.mq5`
+File aktif: `Dachi_Trader_v13_11_35.mq5`
 
 Identifier yang harus sinkron:
-- Header file: `Dachi_Trader_v13_11_34.mq5`
-- Version: `13.11.34`
-- License payload: `"ea_version":"13.11.34"`
-- Init/deinit log: `v13.11.34`
-- Logic marker: `0x13C00340`
+- Header file: `Dachi_Trader_v13_11_35.mq5`
+- Version: `13.11.35`
+- License payload: `"ea_version":"13.11.35"`
+- Init/deinit log: `v13.11.35`
+- Logic marker: `0x13C00350`
 
 ---
 
@@ -191,12 +197,13 @@ Identifier yang harus sinkron:
 
 Karena environment Codex tidak memiliki compiler MQL5, test runtime wajib di MetaEditor/MT5:
 
-1. Compile `Dachi_Trader_v13_11_34.mq5`.
+1. Compile `Dachi_Trader_v13_11_35.mq5`.
 2. Attach ke XAUUSD M5.
 3. Test Blocked Retest Re-entry:
    - Buat kondisi sinyal hard-blocked, lalu tunggu pullback/retest ke MA band.
    - BUY re-entry hanya boleh fire jika `DI+ > DI- + InpBRE_DIMargin`; SELL jika `DI- > DI+ + InpBRE_DIMargin`.
    - Dashboard `Blocked ReEntry` harus menampilkan direction, countdown bars, dan reason saat armed.
+   - History scan harus menampilkan label krem `RE-ENTRY BUY/SELL` pada retest yang valid.
 4. Test remove cleanup:
    - Attach EA, aktifkan visual V-Line/MA/TP-SL/dashboard, lalu remove EA.
    - Semua object prefix `DT13`/`DT13_` harus hilang dari chart.
