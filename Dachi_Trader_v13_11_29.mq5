@@ -1,977 +1,10 @@
-// =============================================================================
-// Dachi_Trader_v13_11_8.mq5 — Expert Advisor
-// Version: 13.11.8
-//
-// Versioning rule (X.Y.Z): every edit bumps a segment AND renames the file.
-//   X = major architectural change (e.g. v12 → v13).
-//   Y = new feature or feature rebuild.
-//   Z = bug fix / small revision.
-// Filename, header comment, and #property version all carry the full X.Y.Z.
-// From v13.9.10 onward the #property version uses the three-part "X.Y.Z"
-// form so Z can be two digits; lint_mq5.py accepts both notations.
-// Renaming detaches MT5 chart attachments — re-attach after each load.
-//
-// CHANGELOG v13.11.2 (fallback slope guard — fix BLOCKED-in-trend bug):
-//   [FIX]      Pullback bars inside a strong trend were being demoted to
-//              RANGING WEAK_ER (BLOCKED) by the pure-ER fallback in v13.11.1.
-//              Cause: CONFIRMED_TREND requires ER ≥ 0.35 AND ADX ≥ 22 AND
-//              MA-gap ≥ 0.50×ATR simultaneously — a brief pullback within
-//              a strong uptrend drops local ER below 0.35 momentarily, so
-//              the bar falls through to the fallback bucket and gets
-//              WEAK_ER → BLOCKED. User report: chart panel showed
-//              "Regime TREND ER=0.61 TREND_UP" (current) but all
-//              historical crossings labeled "! BLOCKED BUY/SELL" magenta.
-//   [LOGIC]    Added EMA50 slope guard to the WEAK_ER fallback path. When
-//              ER ∈ [InpRegime_ER_ChoppyMax, InpRegime_ER_DirectionalMin)
-//              AND |EMA50(shift) - EMA50(shift+N)| ≥ M × ATR14, upgrade
-//              regime to REG_DIRECTIONAL with reason "DIR_BY_SLOPE" (block=
-//              false) instead of REG_RANGING WEAK_ER. Pure sideways
-//              markets (EMA50 flat) still hit WEAK_ER and block.
-//   [INPUTS]   New: InpRegime_FallbackSlopeBars=10 (lookback for EMA50
-//              slope), InpRegime_FallbackSlopeATRMult=0.30 (delta vs ATR
-//              threshold). 0.30×ATR over 10 bars catches even modest
-//              trend slopes while excluding flat ranging.
-//   [HASH]     Logic-version marker (uint)0x13C00010 → (uint)0x13C00080.
-//              .set files from v13.11.1 trigger rescan because some bars
-//              that labeled BLOCKED in v13.11.1 will relabel VALID in
-//              v13.11.2 (pullback inside trend = DIR_BY_SLOPE).
-//
-// CHANGELOG v13.11.1 (regime entry policy tightened per user feedback):
-//   [BEHAVIOR] RANGING and LONG_RANGING now always block entry — the
-//              NEAR_HI/NEAR_LO breakout-edge exceptions and the
-//              LONG_RANGE BREAKOUT_UP/DN allow paths are removed.
-//              User spec: "saya tidak ingin ikut pada market seperti
-//              itu" (don't trade ranging/long-ranging at all). The
-//              reason strings (MID_RANGE, NEAR_HI, BREAKOUT_UP, ...)
-//              are preserved for diagnostic purposes but block=true
-//              regardless. The weak-ER fallback bucket (ER in [0.20,
-//              0.35) without structural confirm) also flips to
-//              block=true.
-//   [LABEL]    RegimeLabelClass mapping changed:
-//                CHOPPY/RANGING/LONG_RANGING       -> SC_BLOCKED
-//                EARLY_BREAKOUT                    -> SC_SOFT (LIMITED)
-//                DIRECTIONAL/STRONG_DIR/CONFIRMED  -> SC_VALID
-//              Chart shows magenta BLOCKED for RANGING/LONG_RANGING
-//              instead of v13.11.0's yellow LIMITED. EARLY_BREAKOUT
-//              keeps the yellow LIMITED label as a caution indicator
-//              while still entering aligned-direction signals.
-//   [LOT]      CalcLot() now applies g_regime_lot_scale when
-//              InpRegime_Enable, so EARLY_BREAKOUT's 0.5x lot rule
-//              (InpRegime_EarlyBreakoutLotMult) actually takes effect
-//              at order open. Was a dormant feature in v13.10.0/v13.11.0
-//              — the global was set but never read by lot calc.
-//   [HASH]     Logic-version marker bumped (uint)0x13C00000 ->
-//              (uint)0x13C00010. .set files from v13.11.0 trigger a
-//              clean rescan because deterministic block/no-block
-//              outcomes shifted for the ranging/long-ranging family.
-//
-// CHANGELOG v13.11.0 (regime tier system + signal-class integration):
-//   [NEW]   Two new regime classes derived from pure-ER fallback when
-//           structural detectors don't fire:
-//             - REG_DIRECTIONAL (ER ∈ [0.35, 0.55))
-//             - REG_STRONG_DIRECTIONAL (ER ≥ 0.55)
-//           Plus low-ER fallback now classifies as CHOPPY (ER < 0.20)
-//           or RANGING (ER ∈ [0.20, 0.35)) instead of NO_CLASS. The
-//           NO_CLASS limbo state is eliminated — every bar gets a
-//           regime label.
-//   [NEW]   Regime now maps to ENUM_SIGNAL_CLASS for chart labeling:
-//             - CHOPPY              → SC_BLOCKED  ("! BLOCKED" magenta)
-//             - RANGING/LONG_RANGING/EARLY_BREAKOUT → SC_SOFT
-//                                                    ("LIMITED" yellow)
-//             - DIRECTIONAL/STRONG_DIR/CONFIRMED_TREND → SC_VALID
-//                                                    ("^ BUY" green)
-//           Final chart label = harshest(filter_class, regime_class)
-//           where rank: VALID(0) < SOFT(1) < BLOCKED(2). Filter VALID +
-//           regime CHOPPY → BLOCKED label. Filter SOFT + regime
-//           DIRECTIONAL → SOFT label. RANGING/LONG_RANGING/EARLY_BR
-//           keep their existing entry rules (mid-range block, breakout
-//           direction match) — label is LIMITED regardless of whether
-//           regime gate blocks the specific signal direction.
-//   [NEW]   ScanHistory now re-evaluates regime at each historical
-//           signal bar via ComputeRegimeAt(shift, &state), so chart
-//           history shows the same harshest-wins label as live. Cost
-//           is one extra ATR/EMA/ER read per historical signal — fine
-//           with the existing 4000-bar scan cap.
-//   [REFACTOR] UpdateMarketRegime split into ComputeRegimeAt(shift, &st)
-//              (pure, shift-aware) + UpdateMarketRegime() wrapper that
-//              calls ComputeRegimeAt(1, ...) and writes the live globals.
-//              CountCrossesIn gained an optional anchor parameter so
-//              historical chop detection scans bars anchor+1..anchor+N.
-//   [INPUTS] New: InpRegime_ER_DirectionalMin=0.35 (lower bound for
-//            DIRECTIONAL fallback), InpRegime_ER_StrongDirMin=0.55
-//            (lower bound for STRONG_DIRECTIONAL). Existing ChoppyMax
-//            (0.20) and NeutralMax (0.35) thresholds preserved.
-//   [PANEL] Regime row gained DIR / STRONG-DIR tags. Both render green
-//           since they're VALID-class. Color of LIMITED-class regimes
-//           (RANGING/LONG_RANGING/EARLY_BR) is yellow on the row to
-//           match the chart label.
-//   [HASH]  Logic-version marker bumped to (uint)0x13C00000 — the new
-//           inputs and new fallback paths affect deterministic regime
-//           classification, so all .set files from v13.10.x trigger a
-//           clean ScanHistory rescan on upgrade.
-//
-// CHANGELOG v13.10.1 (compile-time fixes for v13.10.0 regressions):
-//   [FIX]   FMA-X (Fast MA Protective Exit) referenced the legacy
-//           g_last_entry_was_f11 flag at one callsite — the v13.10.0
-//           rename F11→F3 missed it, so the EA failed to compile with
-//           "undeclared identifier 'g_last_entry_was_f11'". Renamed to
-//           g_last_entry_was_f3 to match the declaration and the rest
-//           of the codebase.
-//   [FIX]   ComputeCrossPriceLI declared ef[2]/es[2] as static-sized
-//           arrays then called ArraySetAsSeries on them, triggering the
-//           MetaEditor warning "cannot be used for static allocated
-//           array". Switched both to dynamic arrays (double ef[],es[])
-//           — same pattern already used by the other ComputeCrossPriceLI
-//           callsites at lines 2924/2932/3720. CopyBuffer auto-resizes
-//           on dynamic arrays, so semantics are unchanged.
-//   [HASH]  Logic-version marker bumped to (uint)0x13B00010.
-//   [NOTE]  The 3-part property-version string still triggers an MQL5
-//           Market warning ("must be xxx.yyy"). Intentional — the X.Y.Z
-//           rule (since v13.9.10) needs the Z segment to support
-//           two-digit patch numbers. EA still compiles + loads; only
-//           MQL5 Market upload would require flattening.
-//
-// CHANGELOG v13.10.0 (filter stack prune + renumber + Market Regime detector):
-//   [BREAK] Massive prune of legacy filter stack and meta-systems. Removed
-//           entirely: Filter Mode (FM_STANDALONE / FM_SCORING and all
-//           scoring weight inputs), Judge System (composite scoring +
-//           F0/F13 override, F11 Judge gate), F1 HTF EMA100, F2 HTF EMA9,
-//           F3, F4, F5, F6, F8 (already forced OFF, dead code purged),
-//           F10 MA Slope/Parallel-Drift (preset enum + 14 knobs), F12
-//           Bulls/Bears Power, F13 HTF Running/Exhaustion (+ ReportOnly +
-//           RVI composite), Volatility Regime, Switch Proxy, Trailing DD
-//           Circuit Breaker, and Circuit Breaker (DD/loss-streak/spread).
-//           All associated inputs, enums, handles (h_htf_ema100, h_htf_ema9,
-//           h_f13_*, h_bulls, h_bears), global state, dashboard rows,
-//           historical evaluators, and EvaluatePipeline branches are gone.
-//   [RENUM] Surviving filters renumbered for clarity:
-//             F0 EMA Gap                  →  F0 (no change)
-//             F7 DI+/DI- Validation       →  F1
-//             F9 Crossing-to-Entry Dist   →  F2
-//             F11 False-Block Recovery    →  F3
-//             F14 Slow MA Direction       →  F4
-//             F15 RVI Overbought/Oversold →  F5
-//           Intelligent Filter (IF) and Wick detector keep their names —
-//           they were never numbered F* filters.
-//   [NEW]   Market Regime detector (issue #11) — classifies current bar
-//           into one of five regimes and gates entries accordingly:
-//             1. CHOPPY        — NO TRADE (block all entries)
-//             2. RANGING       — block at 40-60% range, allow breakout/retest
-//             3. LONG_RANGING  — block middle, breakout-only with retest
-//             4. EARLY_BREAKOUT — allow with reduced lot (0.5x)
-//             5. CONFIRMED_TREND — best mode for MA crossing
-//           Built on ATR(5) fast + ATR(14) base + ATR(20) slow, Efficiency
-//           Ratio (M1 N=14, M5 N=10..14), reuses EMA20/EMA50 from IF and
-//           ADX(14)+DI from existing F1 stack. Toggle via InpRegime_Enable;
-//           each regime has independent on/off + action input.
-//   [F11]   F11 (now F3) recovery visual confirmed: HideBlockedLabelForF3
-//           clears the BLOCKED label at the original block bar, then
-//           DrawF3RecoveryVLine paints an orange OBJ_TREND scoped to the
-//           recovery candle high+pad / low-pad, and DrawSignalLabel
-//           SC_F3_RECOVERY drops the orange "^/v F3 BUY/SELL" label.
-//           Live + historical paths both verified.
-//   [HASH]  Logic-version marker bumped to (uint)0x13B00000.
-//
-// CHANGELOG v13.9.21 (F0 dashboard operator clarity + F11 exit gate bypass):
-//   [UX]    Dashboard F0 row format was "<gap>pt<<threshold>" with the
-//           "<" treated as a separator. Field report: that reads as
-//           "17 < 10" which is mathematically wrong and made users
-//           think F0 blocked when it didn't. The operator is now
-//           dynamic — "<" only when the gap is actually below the
-//           threshold (i.e. F0 is triggered), ">=" otherwise. So a
-//           passing F0 with gap 17 / threshold 10 reads as
-//           "17pt>=10" instead of "17pt<10". Color (red on trigger,
-//           grey when OK) still conveys the trigger state.
-//   [FIX]   Fast MA Protective Exit (FMA-X) refused to arm on F11
-//           recovery entries because its InpEarlyExit_MinGapATR gate
-//           required the EMA fast / slow MA gap to be ≥ 1.0 ATR
-//           before exits would fire. F11 fires right at the cross,
-//           where that gap is by definition near zero — so the
-//           protective exit silently bypassed F11 trades. Now the
-//           MA-gap gate is skipped when the active position came in
-//           via F11 (g_last_entry_was_f11=true). F11 entries are
-//           SOFT to begin with, so reactive fast-MA exits match the
-//           tighter risk profile.
-//   [HASH]  Logic-version marker bumped to (uint)0x13A50000.
-//
-// CHANGELOG v13.9.20 (VR / TrailDD always block + F11 skip-VR toggle):
-//   [FIX]   Volatility Regime (VR_PAUSE) and Trailing-DD Circuit Breaker
-//           are operational kill switches; they should always block a
-//           signal regardless of which Filter Mode is active. In
-//           STANDALONE they already join the HARD OR; in SCORING they
-//           previously only voted if the user assigned a non-zero
-//           weight, so VR_PAUSE active with InpVR_ScoringWeight=0
-//           (the default) let signals pass scoring. Both h_vr and
-//           h_tdd now override the SCORING decision the same way the
-//           Intelligent Filter h_if override added in v13.9.16 does —
-//           if either is set, g_pipe_hard becomes true and the signal
-//           is BLOCKED, not just SCORE-low.
-//   [UX]    BLOCKED-label reason text in OnTick now identifies VR /
-//           TrailDD / IntelliFltr / F9 / F14 / F15 / F1 / F7 as the
-//           triggering filter when none of the previously-recognised
-//           ones (F0/F10/F12/F13) is the cause, instead of the generic
-//           "FILTER".
-//   [NEW]   InpF11_BlockOnVR (default true) — F11 recovery refuses to
-//           fire when VR_PAUSE is active. Live ArmF11Recovery returns
-//           early with reason VR_BLOCK; historical FindF11RecoveryAt
-//           recomputes the ATR ratio at block_idx (ATR(idx) / mean ATR
-//           over InpVR_ATR_AvgPeriod) and skips the recovery when the
-//           ratio crosses InpVR_HighThreshold under VR_PAUSE.
-//   [HASH]  Logic-version marker bumped to (uint)0x13A40000.
-//
-// CHANGELOG v13.9.19 (F11 distance gate + refire window + DIAG_F11 cleanup):
-//   [NEW]   InpF11_MaxDistATR (default 1.5) — F11 recovery refuses to
-//           fire when |recovery_price - cross_price| exceeds this many
-//           ATR. Cross price uses the same linear-interp geometry that
-//           v13.9.15 introduced for F9 so the two filters agree on what
-//           "distance from cross" means. Applied in both live
-//           ProcessF11Recovery and historical FindF11RecoveryAt.
-//   [NEW]   F11 refire window. New inputs:
-//             InpF11_AllowRefire       = true   (default ON)
-//             InpF11_RefireMaxBars     = 10
-//             InpF11_RefireMaxDistATR  = 1.5
-//           After F11 fires and the resulting trade is closed, the
-//           usual InpF11_CooldownBars gate normally blocks a second
-//           attempt. With AllowRefire on, that gate is bypassed when
-//             - bars_since_first_fire < RefireMaxBars
-//             - |current_price - cross_at_first_fire| < RefireMaxDistATR×ATR
-//           i.e., the original setup is still geometrically intact.
-//           New globals g_f11_fire_time / g_f11_fire_cross_px /
-//           g_f11_fire_atr capture the first-fire context.
-//   [UX]    Removed the "? F11" gray DrawDiagMarker from
-//           FindF11RecoveryAt's ScanHistory path. It was being drawn at
-//           the same bar as the orange F11 SELL/BUY label and just
-//           clipped behind it. The label alone is enough.
-//   [HASH]  Logic-version marker bumped to (uint)0x13A30000.
-//
-// CHANGELOG v13.9.18 (F11 vline short + skip-F9 toggle + dashboard z-order):
-//   [UX]    F11 recovery vertical marker is no longer a full-height
-//           OBJ_VLINE. Switched to an OBJ_TREND segment that spans just
-//           the candle bar (high+padding to low-padding) so the marker
-//           is visually scoped to the recovery bar like the regular
-//           signal-bar candle highlight, not a chart-wide line.
-//   [NEW]   InpF11_BlockOnF9 (default true) — when on, F11 recovery
-//           refuses to fire for signals that were blocked by F9
-//           (Crossing-to-Entry Distance). Both the live ArmF11Recovery
-//           and the historical FindF11RecoveryAt re-check F9 at the
-//           block bar before arming/searching. Late entries that F9
-//           filtered out aren't a "false block" — letting F11 break
-//           them back in defeats F9's purpose.
-//   [DASH]  Dashboard panel objects (DB_BG, DB_B_*, DB_L_*, DB_V_*,
-//           DASH_BTN) now set OBJPROP_ZORDER high so they render on
-//           top of chart-coord objects (signal text labels, TP/SL
-//           HLINEs, exit markers). Previously signal labels at low
-//           prices and TP lines could visually punch through the
-//           dashboard's left margin.
-//   [HASH]  Logic-version marker bumped to (uint)0x13A20000.
-//
-// CHANGELOG v13.9.17 (Intelligent Filter dashboard + panel layout tweaks):
-//   [DASH]  Add "IntelliFltr" row to the dashboard so the user can see the
-//           Intelligent Filter's current state without per-bar chart
-//           visualisation. Format: "<TREND> <STATE>" where TREND is
-//           UP / DN / FLAT and STATE is one of:
-//             ALIGN     — signal direction matches trend (allowed)
-//             OUT-BAND  — counter-trend, price outside EMA20/EMA50 (block)
-//             BAND      — counter-trend, price in band, exhaustion OFF (block)
-//             EXH-OK    — counter-trend, price in band, exhaustion confirmed (allow)
-//             EXH-NO    — counter-trend, price in band, exhaustion NOT confirmed (block)
-//           State globals only update during live evaluation (idx==1) so
-//           historical ScanHistory passes don't clobber the live readout.
-//           Per the v13.9.16 spec the filter still draws no chart labels,
-//           markers, or trend lines.
-//   [DASH]  DB_PANEL_W widened 285 → 320 so longer reason texts (Judge
-//           breakdown, IntelliFltr "DN OUT-BAND", etc.) don't get clipped.
-//           PANEL toggle button moved CORNER_RIGHT_UPPER XDISTANCE 6 → 90
-//           so it isn't glued against the right edge of the chart.
-//   [HASH]  Logic-version marker bumped to (uint)0x13A10000.
-//
-// CHANGELOG v13.9.16 (F11 BLOCKED-hide + vline; new Intelligent Filter):
-//   [UX]    When F11 recovers a previously-blocked signal, the BLOCKED
-//           text label at the original block bar is now removed so the
-//           chart only shows the F11 recovery (orange ^/v F11 BUY/SELL
-//           label) instead of the contradictory pair. The SIGBAR_ /
-//           SIGBK_ candle highlights stay because they mark the cross
-//           bar regardless of classification.
-//           Plus a vertical line (OBJ_VLINE) is drawn at the F11 entry
-//           bar in DB_CLR_ORANGE (same hue as the F11 label) to make
-//           the recovery point easy to spot when scrolled out. New
-//           object prefix F11VLINE_<ts> added to the
-//           CleanupHistoricalSignalLabels sweep.
-//   [NEW]   "Intelligent Filter" — a self-contained EMA20/EMA50 short-
-//           trend gate. Toggle on/off; reads EMA20 and EMA50 on the TF
-//           chosen by InpIF_TF (PERIOD_CURRENT means "the chart's own
-//           timeframe"). Rules:
-//             - Uptrend (EMA20 > EMA50): only BUY allowed.
-//             - Downtrend (EMA20 < EMA50): only SELL allowed.
-//             - Counter-trend signal with price OUTSIDE the EMA band
-//               (further than the slower EMA): blocked unconditionally.
-//             - Counter-trend signal with price BETWEEN EMA20 and EMA50,
-//               AND InpIF_UseExhaustion=true: allowed only when the
-//               opposing trend is exhausted (either RVI extreme or
-//               Stochastic %K extreme on the same TF). Otherwise blocked.
-//           When InpIF_UseExhaustion=false, every counter-trend signal
-//           is blocked. When InpIF_Enable=false, the filter is a no-op.
-//           Per spec, the filter has no dashboard row, no signal labels,
-//           and no visualisation — it sits purely between signal detect
-//           and execution.
-//   [HASH]  Logic-version marker bumped to (uint)0x13A00000.
-//
-// CHANGELOG v13.9.15 (F9 cross-price + ATR-per-bar accuracy fix):
-//   [FIX]   F9 was using two coarse approximations that let late entries
-//           past the InpF9_MaxDistATR gate. Field report: ATR=1.77 (177
-//           pts), InpF9_MaxDistATR=1.5 → expected threshold 265.5 pts,
-//           but visible distance entry-to-cross on chart was 466 pts and
-//           F9 still passed.
-//           1. cross_px = mean(ef[0], es[0], ef[1], es[1]) drags the
-//              estimate toward the post-cross MA values. When the post-
-//              cross divergence is large (strong follow-through), the
-//              mean ends up nearer to the entry than the geometric cross
-//              point. F9 then computes a shorter |entry - cross| than
-//              the user measures on chart. Replaced with a linear
-//              interpolation between bar idx+1 and bar idx using the
-//              ef-es deltas — this yields the true geometric cross
-//              price where the two MA lines meet.
-//           2. atr_use defaulted to g_atr_val (live ATR at bar 1) even
-//              when EvalF9At was called from EvaluatePipelineAt with
-//              idx > 1, meaning historical signals were judged against
-//              the current chart's ATR rather than their own. Now the
-//              evaluator reads ATR at idx and falls back to g_atr_val
-//              only if the buffer copy fails.
-//   [HASH]  Logic-version marker bumped to (uint)0x139F0000.
-//
-// CHANGELOG v13.9.14 (F13 RVI composite exhaustion + new F15 RVI OB/OS filter):
-//   [NEW]   F13 optional RVI composite exhaustion check. When
-//           InpF13_UseRVIExhaust=true (default false to preserve v13.9.13
-//           behavior), F13 reads RVI on InpF13_TF and adds an extra
-//           exhaustion vote: BUY blocked if RVI > InpF13_RVI_OBLevel,
-//           SELL blocked if RVI < InpF13_RVI_OSLevel. Combine mode via
-//           InpF13_RVI_RequireAND — false = OR (gap_atr OR rvi triggers
-//           exhaustion), true = AND (both must agree). RVI value is
-//           stashed in g_f13_rvi and shown on the F13 dashboard row.
-//   [NEW]   F15 = standalone RVI Overbought/Oversold filter. Reads RVI
-//           on a user-chosen TF (default PERIOD_CURRENT) and blocks the
-//           signal when momentum is over-extended in the signal
-//           direction. Optional signal-line confirmation (InpF15_
-//           UseSignalLine) adds the classic RVI-vs-signal cross check.
-//           Defaults: Action=F_OFF, Period=10, OBLevel=0.65,
-//           OSLevel=-0.65 — opt-in like F14 / F11. New
-//           InpF15_ScoringWeight = 10.0 plugs F15 into FM_SCORING.
-//   [DASH]  New F15 row added between F14 and Judge. F13 row appends
-//           " R<rvi>" when InpF13_UseRVIExhaust is on so the value
-//           feeding the composite decision is visible.
-//   [HASH]  Hash absorbs all new inputs (4 for F13 RVI composite, 5 for
-//           F15, plus InpF15_ScoringWeight). Logic-version marker
-//           bumped to (uint)0x139E0000.
-//
-// CHANGELOG v13.9.13 (F11 historical OnlyF0Blocks + active-trade TP/SL):
-//   [FIX]   FindF11RecoveryAt (used by ScanHistory) did not honor
-//           InpF11_OnlyF0Blocks, while the live ArmF11Recovery does.
-//           Field report: enabling F14 + F13 made signals "appear valid"
-//           after a block — the orange "F11 BUY/SELL" recovery label
-//           was being drawn next to BLOCKED labels for non-F0 blocks
-//           (e.g. F14-triggered ones), creating the illusion of an
-//           override. Now the historical scan re-evaluates F0 at the
-//           block bar and refuses to mark an F11 recovery unless F0 is
-//           among the triggering filters (when InpF11_OnlyF0Blocks=true,
-//           which is the default). Matches the live arming gate.
-//   [FIX]   F11 recovery TP / SL / Entry trend lines (added in v13.9.12)
-//           now only render when the hypothetical trade is still "open"
-//           — i.e. between the recovery bar and the current bar, price
-//           has not yet closed beyond the final TP (TP2) or the SL.
-//           Stale recoveries from earlier in history no longer paint a
-//           cluster of lines that the user has to mentally filter out.
-//   [HASH]  Logic-version marker bumped to (uint)0x139D0000.
-//
-// CHANGELOG v13.9.12 (visualise Entry/SL/TP at historical F11 recoveries):
-//   [NEW]   ScanHistory now draws a dotted Entry / SL / TP1 / TP2 trend
-//           line cluster at each F11 recovery point it discovers, so the
-//           user can see what the EA's planned levels would have been.
-//           Lines extend 30 bars forward from the recovery bar, anchored
-//           by time, so they only cover the relevant region instead of
-//           painting the entire chart like the live OBJ_HLINE TP/SL.
-//           Live F11 fires were already covered — ProcessF11Recovery
-//           calls DrawTPSLLines() after EAOpen(), and that renders the
-//           normal chart-wide HLINE set. The historical scan path was
-//           the gap.
-//           Dotted style (STYLE_DOT) plus distinct colors (blue entry,
-//           crimson SL, lime-green TPs) keep the cluster visually
-//           separate from solid live TP/SL lines. Multipliers honor
-//           InpF11_EnterAsSoft — soft-mode recoveries get the
-//           InpSoft_* tighter levels.
-//           New object prefix F11LINE_<ts>_<EN|SL|TP1|TP2> added to
-//           CleanupHistoricalSignalLabels so TF switches scrub them
-//           together with the rest of the timestamp-anchored visuals.
-//   [HASH]  Logic-version marker bumped to (uint)0x139C0000.
-//
-// CHANGELOG v13.9.11 (TF-switch SIGBAR/DIAG cleanup completion):
-//   [FIX]   After v13.9.10's TF-switch cleanup landed, a follow-up field
-//           report showed scattered green/red rectangle outlines and the
-//           gray "? SPREAD/SESSION/DAILY" markers still lingered on the
-//           chart after switching timeframes. Root cause: the cleanup
-//           prefix list covered SIG_B_ / SIG_S_ / SIGBK_ / F11M_ / DR_,
-//           but missed two more timestamp-anchored object families:
-//             SIGBAR_<ts>  — green or red 3px rectangle outline that
-//                            ColorSignalCandle draws around every signal
-//                            bar. With OBJ_RECTANGLE pinned to the M5
-//                            bar's [t0..t1] coords, a roundtrip M5→M15
-//                            leaves a tiny phantom rect inside an M15
-//                            candle at the wrong vertical position.
-//             DIAG_<reason>_<ts>  — the gray DrawDiagMarker spread/
-//                            session/daily skip annotations.
-//           Cleanup now also deletes those two families. The DR_ entry
-//           was a misnomer — DrawDR creates dashboard rows under
-//           prefix DR_<id> that are regenerated every tick, so removing
-//           it from the deletion list isn't strictly necessary but the
-//           comment is now corrected.
-//
-// CHANGELOG v13.9.10 (TF-switch label cleanup + F9 excluded from scoring):
-//   [FIX]   Switching chart timeframe (e.g. M5 → M15) left a forest of
-//           stale "v SELL" / "! BLOCKED BUY" labels at positions that did
-//           not match the new TF's MA crossings. Root cause: chart labels
-//           are timestamp-anchored, not TF-anchored, so labels drawn while
-//           on M5 stayed on the chart when MT5 redrew bars at M15 size.
-//           CleanupHistoricalSignalLabels was gated by ComputeFilterHash
-//           changes only, and the hash key was already per-(symbol, TF),
-//           so a TF round-trip (M5 → M15 → M5) found a matching cached
-//           hash on the second visit and skipped cleanup. Now OnInit also
-//           records the last _Period it ran under on a per-ChartID GV.
-//           When the previous TF differs from the current one, cleanup
-//           runs unconditionally before ScanHistory rebuilds labels at
-//           the new TF's signal bars.
-//   [CHG]   F9 (Crossing-to-Entry Distance) no longer participates in the
-//           FM_SCORING approval calculation per user direction. Removed
-//           InpF9_ScoringWeight (was 10.0 default). F9 still behaves
-//           normally under FM_STANDALONE — F_HARD still blocks, F_SOFT
-//           still flags soft. EvaluatePipeline and EvaluatePipelineAt both
-//           drop the F9 line from the scoring branch.
-//   [HASH]  Logic-version marker bumped to (uint)0x139A0000 so users
-//           upgrading from v13.9.9 get one cleanup pass on first load.
-//
-// CHANGELOG v13.9.9 (F0 dashboard threshold + filter hash coverage fix):
-//   [FIX]   Dashboard F0 EMAGap row now displays the resolved threshold
-//           instead of always showing InpGapPoints. When InpGap_UseATRPct
-//           is true the row prints "<gap>pt<<threshold> ATR<pct>%", so
-//           the comparison the evaluator is actually making is visible.
-//           Previously "47pt<100" showed even when ATR% mode was active,
-//           making it look like F0 ignored the % setting.
-//   [FIX]   ComputeFilterHash now covers tuning parameters of every
-//           filter, not just the F_OFF/F_SOFT/F_HARD action enum. Field
-//           symptom that uncovered this: changing F0 from 15% ATR to 5%
-//           ATR left the old BLOCKED labels on chart because hash only
-//           saw InpGap_Action. Toggling F0 off→on (which flipped the
-//           action enum) finally rescanned and the labels updated. Now
-//           changing any threshold value cleans up labels + reruns
-//           ScanHistory so the chart matches the live evaluator. Hash
-//           coverage added for F0/F1/F7/F9/F10 custom/F12/F13 tuning
-//           plus VR threshold. F10 custom params only feed the hash
-//           when InpF10_Preset == CUSTOM, so changes under NORMAL /
-//           LOOSE / STRICT presets don't spuriously rescan.
-//   [HASH]  Logic-version constant bumped to (uint)0x13990000 so users
-//           upgrading from v13.9.8 get one final fresh ScanHistory pass.
-//
-// CHANGELOG v13.9.8 (F14 minimum slope magnitude + Filter Mode scoring):
-//   [NEW]   F14 Slow MA Direction now supports a minimum slope magnitude
-//           threshold via InpF14_MinSlopePts (pts/bar, default 0.0 =
-//           preserve v13.9.7 direction-only behavior). When set > 0, F14
-//           requires |slope| >= threshold in the signal direction; flat
-//           markets with a tiny non-zero slope no longer slip past F14.
-//           Slope is computed as (s_now - s_back) / _Point / lookback.
-//   [NEW]   Filter Mode selector — InpFilterMode = FM_STANDALONE (default,
-//           identical to v13.9.7: each filter HARD-blocks independently)
-//           or FM_SCORING (filters with Action != F_OFF contribute their
-//           configured weight to a 0..100 approval percentage; signal
-//           passes when score >= InpScoring_MinScore). Default weights:
-//           F13 HTF Running = 20 (higher per user direction), all other
-//           signal-quality filters = 10, VR/SP/TrailDD = 0 (operational,
-//           don't vote by default). Judge override is force-disabled
-//           when FM_SCORING is active; OnInit prints a warning if the
-//           user enables both. EvaluatePipelineAt mirrors live behavior
-//           and also now evaluates F14 (integration gap from v13.9.7).
-//   [DASH]  New "FilterMode" row above FSUM showing mode + score/min
-//           when in SCORING mode. F14 row now displays slope value in
-//           pts/bar alongside lookback bars and OK/BLK state.
-//   [HASH]  ComputeFilterHash absorbs InpFilterMode, InpScoring_MinScore,
-//           the 11 weight inputs, and InpF14_MinSlopePts. Logic-version
-//           constant bumped to 0x13980000U so upgrading users get a
-//           fresh ScanHistory pass on first load.
-//
-// CHANGELOG v13.9.7 (F0 signal-bar fix + F14 Slow MA Direction filter):
-//   [FIX]   F0 EMA Gap now evaluates the gap at the SIGNAL bar (bar 1,
-//           just-closed) instead of the forming bar (bar 0). The v13.7.x
-//           comment claimed F0 was already doing this but the code was
-//           still using `_b0` look-ahead values. Symptom in the field:
-//           dashboard shows gap < threshold yet signal is not blocked
-//           because the look-ahead bar's first ticks had widened the
-//           gap. ScanHistory's F0 path is also updated for consistency
-//           (la = idx instead of idx-1). Filter hash bumped via a
-//           logic-version constant so upgrading users get a fresh
-//           scan on first load.
-//   [NEW]   F14 Slow MA Direction — lightweight visual filter as
-//           requested in the user's gambar-2 idea. Blocks the signal
-//           whenever the slow MA is not moving in the signal direction
-//           over the last InpF14_LookbackBars (default 3) bars. No
-//           minimum slope magnitude — any non-zero direction counts.
-//           Default OFF. Cheap independent check that complements
-//           F0/F9/F10 without their stack of sub-conditions.
-//   [DASH]  Dashboard adds F14 row.
-//
-// CHANGELOG v13.9.6 (input label UX fix — readable names in MT5 dialog):
-//   [FIX]   Several inputs that had identical trailing-comment text
-//           ("v13.9.2: clean-slate default OFF") showed up in the MT5
-//           input dialog with the same label since MQL5 uses the
-//           trailing line comment as the displayed name. Replaced
-//           each with a short descriptive label so the Smart TP /
-//           Volatility / Switch Proxy / Trail DD / Circuit Breaker
-//           / Judge / Wick rows now read meaningfully. No logic
-//           change; this is purely cosmetic.
-//
-// CHANGELOG v13.9.5 (Progressive Exit Phase-0 grace period):
-//   [NEW]   Progressive Exit now has three phases instead of two.
-//           Phase 0 = first N bars after entry (default 4). Exit level
-//           is fast EMA shifted by InpPE_Phase0BufferATR × ATR away
-//           from price, giving the trade room to breathe while the
-//           fast MA is still close to entry. Without Phase 0, an early
-//           tick wick could close the trade before it has any chance
-//           to develop. After Phase 0 expires (bars_since_entry >=
-//           InpPE_Phase0Bars), Phase 1 takes over with the original
-//           fast-MA touch/close exit. Phase 2 (BEP lock after the
-//           configured TP) still overrides whichever earlier phase
-//           is active when the TP prints.
-//   [INP]   New inputs in Progressive Exit group:
-//             - InpPE_Phase0Bars        = 4    (1..50)
-//             - InpPE_Phase0BufferATR   = 0.5  (0.0..3.0 ATR multiples)
-//   [DASH]  Dashboard ProgExit row now shows Phase 0 state too:
-//           "P0 3/4 fast-0.5x@<price>" / "P1 fast@<price>" /
-//           "P2 BEP@<entry>".
-//
-// CHANGELOG v13.9.4 (Progressive Exit — fast-MA stop → BEP lock after TP2):
-//   [NEW]   Progressive Exit (PE) — a two-phase exit manager. While the
-//           configured BEP-lock TP level has not been hit, PE closes the
-//           position on a candle touch or close at the chart fast EMA
-//           (depending on trigger mode). After that TP level prints,
-//           PE moves the visual SL line to entry price (BEP / "SL+")
-//           and continues to monitor for any retrace back to entry,
-//           closing the position there if reached. Default OFF.
-//           Inputs: InpUsePE, InpPE_Trigger (TOUCH/CANDLE_CLOSE),
-//           InpPE_BEPAfterTP (which TP level arms BEP, default 2).
-//   [DASH]  New dashboard row "ProgExit" shows OFF / IDLE / P1 (fast@px)
-//           / P2 (BEP@px) state plus current target level.
-//
-// CHANGELOG v13.9.3 (BLOCKED color + filter-change auto-rescan + UX clarity):
-//   [UX]    BLOCKED signal labels now render in magenta instead of red, so
-//           they are visually distinct from the bear-candle color on chart.
-//   [FIX]   Filter setting changes (action toggles, Judge mode, F11/F13
-//           sub-toggles, core MA params) now invalidate historical signal
-//           labels at OnInit. Previously the v13.7.3 preservation logic
-//           kept old BLOCKED labels visible even after the user disabled
-//           the filter that caused them, creating confusion about whether
-//           the EA was still blocking signals. v13.9.3 stores a 32-bit
-//           hash of the filter signature in a chart-scoped GlobalVariable;
-//           if the hash differs from the last load, all SIG_/SIGBK_/F11M_
-//           markers are deleted before ScanHistory re-runs with current
-//           settings. Dashboard, panel button, license overlay, and exit
-//           markers are not touched.
-//   [DOC]   Note for users seeing "BLOCKED with no visible crossing":
-//           DetectSignal compares EMA_fast vs LWMA_slow strictly at bar
-//           close — when MAs are very close, sub-point sign flips are
-//           valid mathematical crossings even if visually invisible. The
-//           label shows the EA is doing its job; the BLOCKED reason will
-//           still be HTF/F0/F10/etc. from whichever filter is enabled.
-//
-// CHANGELOG v13.9.2 (clean-slate defaults — core MA + all features OFF):
-//   [CHANGE] Core slow MA defaults: InpSMA_Slow 18 → 20 and
-//            InpSlowMA_Method MODE_SMA → MODE_LWMA. LWMA20 places more
-//            weight on recent bars, which on XAUUSD scalping tracks the
-//            current swing more closely than SMA20 while still smoothing
-//            tick noise.
-//   [CHANGE] Every feature toggle now defaults to OFF so a fresh install
-//            runs as a pure crossing EA. Filters F0/F1/F7/F9/F10/F12/F13
-//            were already F_OFF; the following are now also OFF by default:
-//              - InpJudge_Mode = JUDGE_OFF (was JUDGE_REPORT_ONLY)
-//              - InpWick_UseFilter = false (was true)
-//              - InpUseVolRegime = false (was true)
-//              - InpUseSwitchProxy = false (was true)
-//              - InpUseTrailDD = false (was true)
-//              - InpUseSmartTP = false (was true)
-//              - InpSTP1_UseSubZones / InpSTP2_UseSubZones / InpSTP3_UsePartial
-//                = false (were true)
-//              - InpUseCB (Circuit Breaker) = false (was true)
-//            Rationale: trader should enable each feature deliberately and
-//            audit its impact before stacking. F11 / F13 ReportOnly / SL /
-//            Early Exit / Adaptive Reversal / Spike SL / DailyLoss /
-//            DailyProfitStop / Session / ManualTP / IndicatorOnly were
-//            already OFF and remain unchanged.
-//
-// CHANGELOG v13.9.1 (F10 slow-slope requirement disabled across presets):
-//   [CHANGE] F10 preset NORMAL and STRICT no longer require the slow MA to
-//            also lean with the signal — fast MA slope is sufficient
-//            directional validation, and slow MA on M5/M15 changes too
-//            slowly to be reliable confirmation. Previously slow-slope
-//            requirement caused valid trend continuations to be blocked
-//            because the slower SMA hadn't fully rotated yet.
-//   [CHANGE] InpF10_RequireSlowSlope default flipped from true to false so
-//            fresh installs and CUSTOM mode also start without slow-slope
-//            gating. Users can still set it true in CUSTOM mode if they
-//            want the legacy behavior.
-//
-// CHANGELOG v13.9.0 (Judge System + F10 preset + F11 hardening + Wick filter):
-//   [NEW]   Judge System — composite scoring engine (0..100) that aggregates
-//           momentum, pressure, volatility regime, candle quality, cross
-//           distance, and HTF alignment into a single probability score.
-//           When score is high enough the Judge can override HARD blocks from
-//           F0 (small EMA gap) and optionally F13 (HTF disagreement). Targets
-//           the issue-#10 false-block scenario where structural filters skip
-//           valid continuation entries that still have strong momentum.
-//   [NEW]   F10 Preset (LOOSE / NORMAL / STRICT / CUSTOM) — collapses the 14
-//           tuning knobs of F10 into one selector. Default NORMAL matches the
-//           v13.8.0 setting profile for M5; LOOSE relaxes slope/expansion for
-//           M1/early-trend; STRICT tightens for M15+ trend mode. CUSTOM keeps
-//           the legacy per-parameter behavior.
-//   [NEW]   Wick / Liquidity Sweep detector — feeds the Judge candle component
-//           and gates F11 recovery. Distinguishes a stop-hunt against the
-//           intended entry (penalty) from a flush against opposition (bonus).
-//   [HARD]  F11 recovery now gated by Judge minimum score, a post-loss
-//           cooldown, MA cross-density (anti-sideway), and the wick sweep
-//           detector. Eliminates the "F11 reentry death loop" in ranging
-//           XAUUSD M5 reported in issue #10.
-//   [CHANGE] F13 keeps full evaluation for the dashboard but can be set to
-//           ReportOnly mode so it never blocks live entries — useful for
-//           observation periods or when delegating the HTF decision to Judge.
-//   [DASH]  Dashboard adds a JUDGE row showing aggregate score, decision
-//           (OFF / OBS / NEUTRAL / OVERRIDE / CONFIRM), and a compact
-//           breakdown so the trader can read why the Judge fired.
-//   [LOG]   Every Judge override prints a single audit line with the score
-//           breakdown so post-trade review is possible without telemetry.
-//
-// CHANGELOG v13.8.0 (F13 settings cleanup):
-//   [CHANGE] F13 HTF fast/slow MA periods and slow method are now inherited
-//            from the core EA MA settings instead of separate visible inputs,
-//            keeping HTF confirmation aligned with the chart strategy DNA.
-//
-// CHANGELOG v13.7.8 (F13 HTF running-signal alignment):
-//   [NEW]   F13 HTF Running Signal & Exhaustion Filter checks whether the
-//           higher timeframe MA state agrees with the chart signal. Example:
-//           M15 BUY can be skipped if H1 running direction is SELL.
-//   [NEW]   Optional HTF exhaustion guard blocks aligned entries when the HTF
-//           ribbon is already over-extended and momentum is fading.
-//   [DASH]  Dashboard shows F13 HTF direction, gap-vs-ATR, and reason.
-//
-// CHANGELOG v13.7.7 (F11 scan audit + cleanup/retired removal):
-//   [NEW]   ScanHistory now audits every HARD-blocked historical signal for
-//           possible F11 false-block recovery and draws an F11 re-entry marker
-//           where the blocked candle is later broken.
-//   [NEW]   F11 receives choppy/ranging protection to avoid firing inside
-//           volume/range regimes, plus optional F12 pressure confirmation.
-//   [NEW]   Daily profit stop blocks new entries after realized EA profit
-//           reaches a user target, mirroring the daily loss guard.
-//   [NEW]   Smart TP has separate toggles for TP1 sub-zones, TP2 sub-zones,
-//           and TP3+ reversal partials.
-//   [FIX]   Parameter reload no longer repaints an already BLOCKED historical
-//           signal into a normal BUY/SELL label; full object cleanup is forced
-//           when the EA is actually removed.
-//   [CHANGE] Retired features are removed from Inputs/Dashboard and kept only
-//           as internal constants where needed for legacy code compatibility.
-//
-// CHANGELOG v13.7.6 (broker SL + volume accounting guard):
-//   [NEW]   When SL Hardline Trigger is TOUCH, the EA now sends the SL price
-//           to the broker/server order field so the S/L column is populated
-//           and the broker-side stop can protect the position. Candle-close
-//           mode remains EA-managed only and does not attach broker SL.
-//   [FIX]   Partial-close requests now verify trade retcodes and resulting
-//           server volume before advancing phase state. A local closed-lot
-//           accumulator caps partial requests so cumulative partial closes
-//           cannot exceed the original EA lot.
-//   [DOC]   Added a simple v13.7.6 user manual and notes about MT5 history
-//           volume display after partial closes.
-//
-// CHANGELOG v13.7.5 (manual TP target exit):
-//   [NEW]   Manual TP Target Exit lets the user choose the TP level that
-//           closes the position automatically, e.g. TP2. The trigger uses
-//           live Bid/Ask touch and closes the whole remaining EA position.
-//   [NEW]   Manual TP can optionally allow or suppress the Smart-TP partial
-//           system before the selected final TP level. If partials are OFF,
-//           the EA holds the full position until the chosen TP is touched.
-//
-// CHANGELOG v13.7.4 (approved filter set + Smart TP1/partial safety):
-//   [CHANGE] Smart TP1 now uses 2 progressive sub-zones instead of 5.
-//           Each zone closes half of InpSTP1_Pct, preventing micro-lot
-//           partial slices that could fail after TP1 was already passed.
-//   [FIX]   Smart TP partial closes are rejected unless the server position
-//           direction still matches runtime direction and floating profit is
-//           positive, protecting against stale-state partials in loss.
-//   [FIX]   Smart SL is now disabled by default and also hard-disabled by the
-//           approved-feature gate so it cannot partial-close loss positions.
-//   [CHANGE] Approved active-entry stack is F0, F1 optional, F7 optional,
-//           F9, F10, F11 recovery, F12, VR, SwitchProxy, spread, session,
-//           daily-loss, and trailing-DD. Legacy F2/F3/F4/F5/F6/F8 plus
-//           late-entry, classic reentry, retest, and Smart SL are forced off.
-//
-// CHANGELOG v13.7.3 (attach-scan no-auto-entry + panel move):
-//   [FIX]   ScanHistory is now visual-only and no longer writes runtime
-//           trade state from historical VALID/SOFT signals. A blocked latest
-//           signal therefore cannot leave stale SELL state/TP-SL lines that
-//           trigger LateEntry after attaching the EA.
-//   [FIX]   Initial attach now reconciles real server position before any
-//           LateEntry check. Historical labels remain visual references only.
-//   [UI]    PANEL button moved below the top-right Dachi Trader title area.
-//
-// CHANGELOG v13.7.2 (F10 compression sideway + TP/SL line sync):
-//   [NEW]   F10 sideway model #4: compressed ribbon drift. Blocks crosses
-//           when fast/slow lines remain tightly overlapped across a short
-//           lookback, even if both lines drift in the same direction.
-//   [FIX]   TP/SL visual state is now cleared whenever runtime trade state
-//           is reset, and every non-blocked fresh signal updates the visual
-//           levels before order handling. This prevents old SELL TP/SL lines
-//           from staying on chart after a new BUY marker appears.
-//   [FIX]   Position-sync now rebuilds fallback levels from server position
-//           price when the broker has an open EA position but internal signal
-//           state was reset.
-//
-// CHANGELOG v13.7.1 (Bulls/Bears confirmation + REV marker/manual):
-//   [NEW]   F12 Bulls/Bears Power Confirmation adds optional directional
-//           pressure validation for M5/M15 false-cross reduction.
-//   [FIX]   Opposite raw cross now draws a REV BUY/SELL marker before any
-//           close attempt, so the reversal candle remains visible as an
-//           exit reference even if broker/server close confirmation fails.
-//   [DOC]   User manual refreshed for v13.7.x feature set.
-//
-// CHANGELOG v13.7.0 (M5/M15 false-cross protection rebuild):
-//   [REBUILD] F10 upgraded from simple numeric slope into MA Structure:
-//           slow-slope direction, separation expansion, hook-back, and
-//           weave-density checks for visual sideway / false-cross regimes.
-//   [NEW]   F11 False-Block Recovery Entry arms after a HARD blocked cross
-//           (optionally F0-only) and enters only if price breaks the blocked
-//           signal candle in the original direction.
-//   [NEW]   Hard SL can close on live touch or candle close. Default is
-//           touch mode for M5/M15 protection.
-//   [REBUILD] Early Exit on Slow MA is repurposed as Fast MA Protective
-//           Exit after MA gap expansion.
-//   [FIX]   Reverse-close now verifies the server position is actually gone
-//           instead of trusting a trade retcode alone, avoiding REV labels
-//           while the old position remains open.
-//
-// CHANGELOG v13.6.1 (Strategy Tester license bypass):
-//   [FIX]   MT5 Strategy Tester / Optimizer is a sandboxed environment
-//           with no WebRequest network access. The license verify call
-//           always failed in backtest, so the EA painted the
-//           UNAUTHORIZED overlay and refused to evaluate signals.
-//           Now LicenseIsBlocking() returns false whenever
-//           MQLInfoInteger(MQL_TESTER)==1 or
-//           MQLInfoInteger(MQL_OPTIMIZATION)==1. CheckLicence() also
-//           short-circuits in tester so the log isn't spammed with
-//           "WebRequest failed err=4014" noise.
-//           Dashboard "License" row reads "TESTER" (cyan) under those
-//           conditions for visibility. Live charts still enforce.
-//
-// CHANGELOG v13.6.0 (F10 MA-slope filter + F0 ATR-pct + F1 directional):
-//   [NEW]   F10: MA Slope / Parallel-Drift Filter. Blocks signals where
-//           the fast and slow MAs are nearly parallel with a tiny slope
-//           — typical of sideway/consolidation crosses that produce
-//           false signals (the user's screenshot showed a textbook
-//           example where both EMAs cross while drifting almost flat).
-//           Inputs:
-//             InpF10_Action          (OFF/SOFT/HARD, default OFF)
-//             InpF10_SlopeBars       (default 5)  — bars to measure slope
-//             InpF10_MinSlopePts     (default 3)  — min |slope| pts/bar
-//             InpF10_MaxParallelPts  (default 1.5) — max |Δslope| to
-//                                                    count as "parallel"
-//   [NEW]   F0 EMA Gap can now use a percentage of ATR instead of
-//           a fixed point threshold. Set InpGap_UseATRPct=true and
-//           InpGap_ATRPct (default 50) — threshold = ATR × pct/100.
-//           Lets the gap auto-scale on volatile vs quiet markets.
-//   [NEW]   F1 HTF EMA100 stair-step gains an optional directional
-//           alignment requirement. When InpF1_RequireDirection=true,
-//           a BUY signal is also blocked if the HTF EMA100 has not
-//           moved UP since the last signal (current ≤ stored), even
-//           when the magnitude threshold is satisfied. SELL likewise.
-//           This closes the "EMA100 swung sideways but moved enough"
-//           loophole the user reported.
-//
-// CHANGELOG v13.5.0 (license inputs hardcoded, session filter rebuild,
-//                    Switch Proxy any-timeframe, license-deny-no-grace,
-//                    full unauthorized cleanup):
-//   [SECURITY] All InpLicense_* inputs (Enabled, URL, HmacSecret,
-//           RecheckMin, GraceDays) are now #define / const. They no
-//           longer appear in the EA Properties dialog. The HMAC secret
-//           is embedded directly in the .mq5 / .ex5 — never distribute
-//           the source file to end users.
-//   [FIX]   When the license server returns valid=false with a correct
-//           HMAC signature, the EA now refuses to fall back to the
-//           offline grace cache. Previously a terminated subscription
-//           kept working until the cached verify aged out 7 days.
-//           Grace is now reserved for genuinely-unreachable scenarios
-//           (network down, HTTP error, bad signature).
-//   [REBUILD] Session filter logic flipped + auto-close on session
-//           exit. New semantics:
-//             InpSessionMon=true  → session filter ACTIVE on Monday,
-//                                   block trading outside the
-//                                   [InpSessionStart, InpSessionEnd)
-//                                   window
-//             InpSessionMon=false → no session filter on Monday, EA
-//                                   trades freely 24h
-//           Defaults flipped to false on every day so the filter
-//           opts-in. When the clock crosses the end-of-window on a
-//           filter-active day, any open EA position is auto-closed
-//           with reason "SESSION".
-//   [NEW]   InpSwitchProxy_AnyTimeframe — when true, the AND filter
-//           runs even on M5 / M1 (default false → keeps the M15+ auto
-//           gate the user is used to).
-//   [FIX]   Unauthorized overlay now actively removes the dashboard,
-//           ribbon, TP/SL lines, signal labels, and all DT prefixed
-//           objects on every tick — only the overlay text remains.
-//
-// CHANGELOG v13.4.1 (License gate hardening):
-//   [FIX]   v13.4.0 only blocked EAOpen() on license invalid, so an EA
-//           started in InpIndicatorOnly=true mode kept rendering signals
-//           and the dashboard. From this version the gate fires globally:
-//           every per-tick code path (signal detection, ribbon, dashboard,
-//           Smart-TP/SL, re-entry, retest, all of it) early-returns when
-//           InpLicense_Enabled=true AND g_license_valid=false. The chart
-//           displays a full UNAUTHORIZED ACCOUNT overlay instead.
-//   [NEW]   LIC_DrawUnauthorizedOverlay() — a red full-chart rectangle
-//           plus 3-line bold text. Repainted every OnTick so a manual
-//           ObjectDelete by the user is undone within seconds.
-//   [NEW]   On the very first OnInit where the license is found invalid,
-//           the EA also pops up an Alert("Dachi Trader: Unauthorized
-//           account...") so the operator notices even if the chart is
-//           minimised. Repeats once per OnTimer transition from valid
-//           to invalid (so a license that expires mid-day surfaces a
-//           fresh popup instead of silently blanking the chart).
-//   [NEW]   OnDeinit cleans up overlay objects.
-//
-// CHANGELOG v13.4.0 (Online license check + HMAC-SHA256 verify):
-//   [NEW]   LicenseClient module: every OnInit + every InpLicense_RecheckMin
-//           minutes the EA POSTs to /backend/api/license/verify.php with the
-//           current account number, parses the JSON response, and verifies
-//           the HMAC-SHA256 signature against InpLicense_HmacSecret. Match
-//           required for "valid".
-//   [NEW]   Offline grace cache: the most recent successful verify is
-//           persisted to a global variable (account number + expires_at +
-//           plan + verified_at). If the server is unreachable the EA keeps
-//           trading for InpLicense_GraceDays days using the cached result;
-//           after that, trade entries are blocked.
-//   [NEW]   Trade-gate integration: EAOpen() refuses to send orders when
-//           g_license_valid==false (mirrors the existing IndicatorOnly gate).
-//           Existing positions are not closed; only new entries are blocked.
-//   [NEW]   Dashboard row "License" shows status (OK <expiry> / GRACE Nd /
-//           DENIED / OFFLINE). Yellow during grace, red on denial.
-//   [NEW]   Inputs:
-//             InpLicense_Enabled       (bool, default true)
-//             InpLicense_URL           (string, default https://dachi-trader.com)
-//             InpLicense_HmacSecret    (string, must match server config)
-//             InpLicense_RecheckMin    (int, default 60 minutes)
-//             InpLicense_GraceDays     (int, default 7)
-//           Anda HARUS isi InpLicense_HmacSecret dengan secret yang sama
-//           seperti di backend config.php → license.hmac_secret.
-//   [SETUP] MT5 → Tools → Options → Expert Advisors → "Allow WebRequest
-//           for listed URL" → tambah https://dachi-trader.com supaya
-//           WebRequest tidak ditolak terminal.
-//
-// CHANGELOG v13.3.0 (Mar-19 mitigation + UX clean-up):
-//   [NEW]   Volatility Regime filter — measures ATR(14)/ATR_avg(50). When
-//           ratio >= InpVR_HighThreshold (default 1.5) the regime is "high
-//           volatility expansion". Action TIGHTEN (default) treats new
-//           signals as SOFT (forced Smart-SL, tight TP). Action PAUSE
-//           hard-blocks all entries.
-//   [NEW]   Switch Proxy (ATR-Normalized Deviation) — auto-active only on
-//           M15 and higher. Computes stdev(close,20)/ATR. AND > 0.7 marks
-//           the regime as "choppy" and forces SOFT entry. AND <= 0.7 has
-//           no effect. Designed to gate noisy regimes that look directional
-//           but are mean-reverting.
-//   [NEW]   Trailing Drawdown Circuit Breaker — tracks session peak
-//           equity. If current equity drops InpTrailDD_Pct (default 5%)
-//           below peak, hard-blocks entries until next trading day. Resets
-//           daily alongside the existing daily-loss tracker.
-//   [NEW]   RE-ENTRY label class (white) — when a previously-BLOCKED
-//           signal eventually fires after re-entry conditions are met, it
-//           is drawn as "RE-ENTRY BUY/SELL" white and forced into SOFT
-//           mode (tight TP, forced Smart-SL) regardless of the current
-//           pipeline soft/valid result. Same applies to retest re-entry.
-//   [FIX]   BLOCKED signals no longer draw entry / SL / TP lines on chart.
-//           They previously did via UpdateVisualForSignal in ScanHistory
-//           and OnTick BLOCKED branch — confusing because lines suggested
-//           an entry was placed when it wasn't. Now BLOCKED only renders
-//           the label.
-//   [FIX]   F0 EMA Gap dashboard row now displays the gap measured AT THE
-//           LAST SIGNAL bar (g_last_signal_gap_pts) instead of the live
-//           current-bar gap. The filter evaluates against signal-bar gap,
-//           so the dashboard now reflects the same number used for the
-//           HARD/SOFT decision. Fixes the "273pt > 100, but blocked"
-//           confusion (live gap 273, signal-bar gap was small).
-//
-// CHANGELOG v13.2.2 (Smart TP comparator consistency):
-//   [FIX]   Smart TP1 / Smart TP2 sub-zone reach test now compares the live
-//           tick price (Bid for BUY, Ask for SELL) instead of the forming
-//           bar's iHigh/iLow. Brings them in line with Smart SL (v13.2.1)
-//           and Smart TP3 — eliminates phantom-trigger when a bar wicks
-//           past a zone but retraces before close.
-//   [TOOL]  scripts/lint_mq5.py added: brace balance, version triplet
-//           consistency, stale-symbol deny list, function-coverage warn.
-//           Run before every commit.
-//
-// CHANGELOG v13.2.1 (Smart SL phantom-trigger fix + Spike simplified):
-//   [FIX]   Smart SL no longer fires on transient bar dips that recover.
-//           Was: compared bar-0 low/high against zone levels — a brief
-//           intra-bar dip on a profitable bar crossed a zone even though
-//           current price was still favorable.
-//           Now: compares live tick price (Bid for BUY, Ask for SELL)
-//           against the zone levels. Only confirmed adverse positioning
-//           triggers a partial.
-//   [REBUILD] Spike SL simplified to a pure adverse-velocity exit.
-//             Volume gate removed (InpSpike_VolMult and
-//             InpSpike_VolLookback inputs deleted). Trigger fires when
-//             the forming bar's worst adverse excursion vs entry exceeds
-//             InpSpike_ATR_Mult × entry ATR. Re-entry behaviour
-//             unchanged: spike exit does not arm re-entry; a fresh
-//             crossing signal still fires a new trade per the pipeline.
-//
-// CHANGELOG v13.2.0 (Smart TP sub-zone fix + Smart SL rebuild):
-//   [FIX]   Smart TP1 sub-phases now fire progressively at each 1/5 sub-zone
-//           between entry and TP1. Previously all 5 partials fired at once
-//           the moment TP1 was reached.
-//   [FIX]   Smart TP2 sub-phases now fire at each 1/2 sub-zone between TP1
-//           and TP2 (previously fired together on TP2 hit).
-//   [REBUILD] Smart SL reworked into a risk-mitigation scale-out: entry → SL
-//           is split into 5 equal zones; each adverse zone-touch closes 20 %
-//           of the initial lot. By the time the 5th zone (SL price) is hit
-//           the position is fully flat. Old P0 timeout / P1+P2 trailing /
-//           P3 floor logic removed, along with their inputs.
-//
-// CHANGELOG v13.1.0 (feature round):
-//   [REMOVED] DUP classification — every crossing now runs through the
-//           filter pipeline; same-direction crossings get a label but no
-//           physical entry while a position is active.
-//   [REBUILD] Spike SL uses intrabar adverse excursion vs entry (not SL
-//           price gate). Volume-gated. Does not arm re-entry.
-//   [NEW]   InpSlowMA_Method input — pick SMA / EMA / SMMA / LWMA for the
-//           slow line.
-//   [NEW]   Session filter gains Mon-Sun day toggles.
-//   [NEW]   F9 Crossing-to-Entry Distance filter (OFF/SOFT/HARD, default 1.5×ATR).
-//
-// CHANGELOG v13.0.1 (patch round):
-//   [FIX]   F1/F2 evaluated in ScanHistory using iBarShift-based HTF
-//           lookup. ScanHistory updates HTF memory progressively.
-//   [FIX]   SOFT label renamed to LIMITED (yellow). BLOCKED label white.
-//   [NEW]   UpdateVisualForSignal helper renders TP/SL lines for BLOCKED
-//           and LIMITED signals even when no position is active.
-//
-// CHANGELOG v13.0.0 (RESTART from v12.11.5 — new filter architecture):
-//   [ARCH]  Replaced fixed hard/soft layer system with per-filter OFF/SOFT/HARD
-//           toggle (ENUM_FILTER_ACTION). Each filter independently controls
-//           whether it blocks entry (HARD), tightens TP/SL (SOFT), or is
-//           ignored (OFF). No more overlapping layer coupling.
-//   [NEW]   F0–F8: EMA Gap / HTF EMA100 step / HTF EMA9 match / ADX / CHOP
-//           / RSI / Strong-trend override / DI validation / Zone breakout.
-//   [REMOVED] L1 Crossing Angle, L3 Bollinger, L4 M1 Sideway, Envelope, MinGap.
-//   [CHANGE] TP1 default 0.75×ATR, TP2 = TP1 + 0.75×ATR = 1.5×ATR from entry.
-//   [CHANGE] OBJ_PREFIX → "DT13_", trade comments → "DT13 BUY/SELL".
-//
-// © Daniel @danieljulyanto 2026. All rights reserved.
-// =============================================================================
+// Dachi_Trader_v13_11_29.mq5 — Expert Advisor
+// Version: 13.11.29
+// Clean Core branch: simplified runtime pipeline (F2 + HTF gate).
 
 #property copyright   "Daniel @danieljulyanto"
-#property version     "13.11.8"
-#property description "Dachi Trader v13.11.8 — Expert Advisor"
+#property version     "13.11.29"
+#property description "Dachi Trader v13.11.29 — Expert Advisor"
 
 #define MAX_TP            30
 #define VOL_AVG_PERIOD    20
@@ -1004,6 +37,8 @@
 enum ENUM_FILTER_ACTION { F_OFF=0, F_SOFT=1, F_HARD=2 };
 enum ENUM_SIGNAL_CLASS  { SC_VALID=0, SC_SOFT=1, SC_BLOCKED=2, SC_REENTRY=3, SC_REVERSAL=4, SC_F3_RECOVERY=5 };
 enum ENUM_EXIT_TRIGGER  { EXIT_ON_TOUCH=0, EXIT_ON_CANDLE_CLOSE=1 };
+enum ENUM_FILTER_DECISION { DEC_OK=0, DEC_LIMITED=1, DEC_BLOCKED=2 };
+enum ENUM_SQUEEZE_STATE { SQ_NONE=0, SQ_BUILDUP=1, SQ_ARMED=2, SQ_BREAKOUT_UP=3, SQ_BREAKOUT_DN=4, SQ_CONFIRMED_UP=5, SQ_CONFIRMED_DN=6, SQ_FALSE_BREAK=7, SQ_LOCKOUT=8 };
 // v13.10.0 Market Regime classification (issue #11)
 enum ENUM_REGIME        { REG_UNKNOWN=0, REG_CHOPPY=1, REG_RANGING=2, REG_LONG_RANGING=3, REG_EARLY_BREAKOUT=4, REG_CONFIRMED_TREND=5, REG_DIRECTIONAL=6, REG_STRONG_DIRECTIONAL=7 };
 
@@ -1014,6 +49,11 @@ input bool   InpAutoLot         = false;
 input double InpManualLot       = 0.01;
 input double InpAutoLotDivider  = 20000;
 input int    InpEAMagic         = 202603;
+input int    InpStartupScanBars = 1200;      // max historical bars scanned on attach/settings reload
+input int    InpVisualLazyBars  = 1200;      // initial MA/V-Line visual bars; expands on chart scroll
+input bool   InpShowCoreMALines = true;      // show/hide both core MA lines and ribbon fill
+input bool   InpShowTPSLEntryLines = true;   // show/hide ENTRY, SL, and TP lines/labels
+input bool   InpShowBlockedSignals = true;  // show/hide BLOCKED signal labels and candle boxes
 const bool   InpLateEntry       = false;
 const double InpLateEntryATR    = 1.0;
 
@@ -1023,70 +63,115 @@ input int    InpSMA_Slow        = 20;
 input ENUM_MA_METHOD InpSlowMA_Method = MODE_LWMA;  // Slow MA method: SMA/EMA/SMMA/LWMA (v13.9.2: LWMA20 baseline)
 input int    InpATR_Period      = 14;
 
+input group "=== Visual Slow MA Angle Guard ==="
+input bool   InpUseSlowMAAngleGuard   = true;
+input double InpSlowMA_MinAngleDeg    = 0.0;    // BUY needs >= +deg, SELL needs <= -deg; 0 allows flat in signal direction
+
 input group "=== Clean Core HTF Context (H1 Bias + M15 Setup) ==="
 input bool   InpUseH1Bias         = true;
 input bool   InpAllowNeutralBias  = false;
 input bool   InpUseM15Setup       = true;
 input bool   InpAllowM15Neutral   = false;
+input bool   InpHTF_AllowReversalOverride = true;
+input double InpHTF_ReversalBodyATRMin    = 0.70;
 
-input group "=== F0: EMA Gap Filter ==="
-input ENUM_FILTER_ACTION InpGap_Action  = F_SOFT;
+input group "=== V-Line Bias Guard ==="
+input bool            InpUseVLineGuard      = true;   // V-Line bias guard
+input ENUM_TIMEFRAMES InpVLine_TF                 = PERIOD_CURRENT;
+input int             InpVLine_ATRLength          = 10;
+input double          InpVLine_BaseMultiplier     = 3.0;
+input double          InpVLine_NoiseThresholdATR  = 1.0;
+input double          InpVLine_ExpansionAlphaATR  = 0.5;
+input bool            InpVLine_BlockNeutral       = false;
+input bool            InpVLine_ShowVisual         = true;
+input bool            InpVLine_ShowSwitchLabels   = true;
+input int             InpVLine_VisualBars         = 500;
+
+input bool   InpUseSidewayGuard           = true;
+input double InpSideway_MinEMASlopePts    = 0.35;
+input int    InpSideway_CrossLookback      = 12;
+input int    InpSideway_MaxCrosses         = 2;
+input double InpSideway_MinMAGapATR        = 0.12;
+
+input bool   InpUseATRHealthGuard          = true;
+input double InpATR_M5_MinTrade            = 0.90;
+input double InpATR_M5_MaxNormal           = 2.80;
+input double InpATR_M5_MaxAllowed          = 4.50;
+input double InpATR_M5_BlockAbove          = 5.50;
+input double InpATR_FastRatioLimited       = 1.80;
+input double InpATR_FastRatioBlock         = 2.20;
+
+input bool   InpUseSqueezeGuard            = true;
+input int    InpSQ_Lookback                = 20;
+input double InpSQ_RangeATRMax             = 3.50;
+input double InpSQ_ATRCompressionMax       = 0.80;
+input double InpSQ_MAGapATRMax             = 0.18;
+input int    InpSQ_CrossDensityLookback    = 30;
+input int    InpSQ_CrossDensityMin         = 3;
+input double InpSQ_BreakoutBufferATR       = 0.30;
+input double InpSQ_MinBodyRatio            = 0.55;
+input double InpSQ_BuyCloseLocMin          = 0.65;
+input double InpSQ_SellCloseLocMax         = 0.35;
+input double InpSQ_SpikeRatioBlock         = 2.20;
+
+// input group "=== F0: EMA Gap Filter ==="
+const ENUM_FILTER_ACTION InpGap_Action  = F_SOFT;
 input int    InpGapPoints       = 100;       // min gap bar-0 look-ahead (points)
 // v13.6.0: when true, the F0 threshold is computed dynamically as
 // ATR × InpGap_ATRPct/100 instead of the static InpGapPoints.
 // Useful when one EA preset is shared across high-vol (XAU news) and
 // low-vol regimes — point thresholds don't scale, ATR-pct does.
-input bool   InpGap_UseATRPct   = true;
-input double InpGap_ATRPct      = 35.0;      // % of ATR to require as min gap
+const bool   InpGap_UseATRPct   = true;
+const double InpGap_ATRPct      = 35.0;      // % of ATR to require as min gap
 
-input group "=== F1: DI+/DI- Validation (was F7 pre-v13.10.0) ==="
-input ENUM_FILTER_ACTION InpF1_Action   = F_SOFT;
-input double InpF1_Margin       = 3.0;       // DI margin
+// input group "=== F1: DI+/DI- Validation (was F7 pre-v13.10.0) ==="
+const ENUM_FILTER_ACTION InpF1_Action   = F_SOFT;
+const double InpF1_Margin       = 3.0;       // DI margin
 
 input group "=== F2: Crossing-to-Entry Distance (was F9 pre-v13.10.0) ==="
 // Block signals where close (entry) is too far from the MA crossing point.
 input ENUM_FILTER_ACTION InpF2_Action   = F_HARD;
 input double InpF2_MaxDistATR            = 1.7;  // max |entry - cross_price| in ATR
 
-input group "=== F3: False-Block Recovery Entry (was F11 pre-v13.10.0) ==="
+// input group "=== F3: False-Block Recovery Entry (was F11 pre-v13.10.0) ==="
 // Re-enters after a HARD blocked F0 cross only if price proves the block was
 // false by breaking the blocked candle in signal direction.
-input bool   InpF3_UseRecovery             = false;
-input bool   InpF3_OnlyF0Blocks            = true;
-input bool   InpF3_BlockOnF2               = true;   // never recover F2 (cross distance) blocks
-input int    InpF3_RecoveryBars            = 8;
-input double InpF3_BreakBufferATR          = 0.10;
-input ENUM_EXIT_TRIGGER InpF3_Trigger      = EXIT_ON_CANDLE_CLOSE;
-input bool   InpF3_RequireMAAligned        = true;
-input bool   InpF3_RequireDIDirection      = true;
-input bool   InpF3_EnterAsSoft             = true;
-input bool   InpF3_BlockChoppyRange        = true;   // block recovery in ranging/choppy regimes
-input double InpF3_MaxChoppyAND            = 0.65;   // stddev/ATR ceiling for F3 recovery
-input int    InpF3_CooldownBars            = 20;     // block F3 N bars after a losing F3 trade
-input bool   InpF3_BlockWickSweep          = true;   // skip F3 if last bar is a wick sweep against dir
-input int    InpF3_CrossDensityLookback    = 30;     // bars to count MA crosses
-input int    InpF3_MaxCrossDensity         = 5;      // > this many crosses in lookback → F3 off (sideway)
+const bool   InpF3_UseRecovery             = false;
+const bool   InpF3_OnlyF0Blocks            = true;
+const bool   InpF3_BlockOnF2               = true;   // never recover F2 (cross distance) blocks
+const int    InpF3_RecoveryBars            = 8;
+const double InpF3_BreakBufferATR          = 0.10;
+const ENUM_EXIT_TRIGGER InpF3_Trigger      = EXIT_ON_CANDLE_CLOSE;
+const bool   InpF3_RequireMAAligned        = true;
+const bool   InpF3_RequireDIDirection      = true;
+const bool   InpF3_EnterAsSoft             = true;
+const bool   InpF3_BlockChoppyRange        = true;   // block recovery in ranging/choppy regimes
+const double InpF3_MaxChoppyAND            = 0.65;   // stddev/ATR ceiling for F3 recovery
+const int    InpF3_CooldownBars            = 20;     // block F3 N bars after a losing F3 trade
+const bool   InpF3_BlockWickSweep          = true;   // skip F3 if last bar is a wick sweep against dir
+const int    InpF3_CrossDensityLookback    = 30;     // bars to count MA crosses
+const int    InpF3_MaxCrossDensity         = 5;      // > this many crosses in lookback → F3 off (sideway)
 // Recovery point must be geometrically close to the original cross.
-input double InpF3_MaxDistATR              = 1.5;    // |recovery_px - cross_px| max in ATR
+const double InpF3_MaxDistATR              = 1.5;    // |recovery_px - cross_px| max in ATR
 // Refire window. Skip cooldown when the original setup is still intact.
-input bool   InpF3_AllowRefire             = true;
-input int    InpF3_RefireMaxBars           = 10;     // re-arm within this many bars of first fire
-input double InpF3_RefireMaxDistATR        = 1.5;    // and price still within this many ATR of cross
+const bool   InpF3_AllowRefire             = true;
+const int    InpF3_RefireMaxBars           = 10;     // re-arm within this many bars of first fire
+const double InpF3_RefireMaxDistATR        = 1.5;    // and price still within this many ATR of cross
 
-input group "=== F4: Slow MA Direction (was F14 pre-v13.10.0) ==="
-input ENUM_FILTER_ACTION InpF4_Action       = F_SOFT;
-input int                InpF4_LookbackBars = 4;
-input double             InpF4_MinSlopePts  = 0.6;  // 0 = any direction; >0 = min slope pts/bar
+// input group "=== F4: Slow MA Direction (was F14 pre-v13.10.0) ==="
+const ENUM_FILTER_ACTION InpF4_Action       = F_SOFT;
+const int                InpF4_LookbackBars = 4;
+const double             InpF4_MinSlopePts  = 0.6;  // 0 = any direction; >0 = min slope pts/bar
 
-input group "=== F5: RVI Overbought/Oversold (was F15 pre-v13.10.0) ==="
-input ENUM_FILTER_ACTION InpF5_Action          = F_SOFT;
-input ENUM_TIMEFRAMES    InpF5_TF              = PERIOD_CURRENT;
-input int                InpF5_Period          = 12;
-input double             InpF5_OBLevel         = 0.72;   // BUY blocked when RVI > this
-input double             InpF5_OSLevel         = -0.72;  // SELL blocked when RVI < this
-input bool               InpF5_UseSignalLine   = true;  // also require RVI vs SignalLine cross
+// input group "=== F5: RVI Overbought/Oversold (was F15 pre-v13.10.0) ==="
+const ENUM_FILTER_ACTION InpF5_Action          = F_SOFT;
+const ENUM_TIMEFRAMES    InpF5_TF              = PERIOD_CURRENT;
+const int                InpF5_Period          = 12;
+const double             InpF5_OBLevel         = 0.72;   // BUY blocked when RVI > this
+const double             InpF5_OSLevel         = -0.72;  // SELL blocked when RVI < this
+const bool               InpF5_UseSignalLine   = true;  // also require RVI vs SignalLine cross
 
-input group "=== Intelligent Filter (v13.9.16) ==="
+// input group "=== Intelligent Filter (v13.9.16) ==="
 // Self-contained EMA20/EMA50 short-trend gate. No dashboard row, no labels,
 // no visual artifacts. Works behind the scenes between signal detect and
 // pipeline execution.
@@ -1099,9 +184,9 @@ input group "=== Intelligent Filter (v13.9.16) ==="
 //     signal is blocked.
 // TF = PERIOD_CURRENT reads EMAs/RVI/Stoch on whatever timeframe the chart
 // is showing (useful for one-EA-many-charts setups).
-input bool            InpIF_Enable        = true;
-input ENUM_TIMEFRAMES InpIF_TF            = PERIOD_CURRENT;
-input bool            InpIF_UseExhaustion = true;
+const bool            InpIF_Enable        = true;
+const ENUM_TIMEFRAMES InpIF_TF            = PERIOD_CURRENT;
+const bool            InpIF_UseExhaustion = true;
 
 input group "=== Wick / Liquidity Sweep Detector (v13.9.0) ==="
 // Used by Judge candle component and F11 break-candle guard. Distinguishes:
@@ -1114,66 +199,66 @@ input int    InpWick_SweepLookback          = 10;    // bars to scan for prev hi
 input double InpWick_MinWickRatio           = 0.60;  // wick/range ratio to count as dominant
 input int    InpWick_ConfirmBars            = 1;     // post-sweep confirm bars (reserved)
 
-input group "=== Market Regime Detector (v13.10.0, issue #11) ==="
+// input group "=== Market Regime Detector (v13.10.0, issue #11) ==="
 // Classifies the current bar into one of five regimes and gates entries.
 // Built on ATR fast/slow + Efficiency Ratio + EMA20/50 + ADX/DI.
-input bool   InpRegime_Enable         = true;
+const bool   InpRegime_Enable         = true;
 // --- ATR setup (in addition to base ATR(14)) ---
-input int    InpRegime_ATRFastPeriod  = 5;       // ATR fast = recent volatility
-input int    InpRegime_ATRSlowPeriod  = 20;      // ATR slow = stable baseline
+const int    InpRegime_ATRFastPeriod  = 5;       // ATR fast = recent volatility
+const int    InpRegime_ATRSlowPeriod  = 20;      // ATR slow = stable baseline
 // --- Efficiency Ratio ---
-input int    InpRegime_ER_Period      = 12;      // N for ER calc (M1=14, M5=10..14)
-input double InpRegime_ER_ChoppyMax   = 0.18;    // ER < this → choppy (fallback also)
-input double InpRegime_ER_NeutralMax  = 0.33;    // ER < this → ranging fallback
-input double InpRegime_ER_DirectionalMin = 0.33; // ER ≥ this → DIRECTIONAL fallback
-input double InpRegime_ER_StrongDirMin   = 0.52; // ER ≥ this → STRONG_DIRECTIONAL fallback
+const int    InpRegime_ER_Period      = 12;      // N for ER calc (M1=14, M5=10..14)
+const double InpRegime_ER_ChoppyMax   = 0.18;    // ER < this → choppy (fallback also)
+const double InpRegime_ER_NeutralMax  = 0.33;    // ER < this → ranging fallback
+const double InpRegime_ER_DirectionalMin = 0.33; // ER ≥ this → DIRECTIONAL fallback
+const double InpRegime_ER_StrongDirMin   = 0.52; // ER ≥ this → STRONG_DIRECTIONAL fallback
 // v13.11.2 — slope guard for fallback bucket. When ER is in [ChoppyMax,
 // DirectionalMin) but EMA50 has clearly directional slope over the past N
 // bars, upgrade RANGING WEAK_ER → DIRECTIONAL (so pullback bars inside a
 // strong trend don't get blocked when their local ER dips).
-input int    InpRegime_FallbackSlopeBars   = 10;   // bars back for EMA50 slope check
-input double InpRegime_FallbackSlopeATRMult= 0.30; // EMA50 delta ≥ this × ATR ⇒ directional
+const int    InpRegime_FallbackSlopeBars   = 10;   // bars back for EMA50 slope check
+const double InpRegime_FallbackSlopeATRMult= 0.30; // EMA50 delta ≥ this × ATR ⇒ directional
 // --- EMA20/EMA50 (reused from IF when IF is also on) ---
-input int    InpRegime_EMA_Fast       = 20;
-input int    InpRegime_EMA_Slow       = 50;
+const int    InpRegime_EMA_Fast       = 20;
+const int    InpRegime_EMA_Slow       = 50;
 // --- Choppy regime detection ---
-input bool   InpRegime_DetectChoppy   = true;
-input int    InpRegime_ChoppyLookback = 24;      // bars for range / cross-count
-input double InpRegime_ChoppyRangeATRMult = 1.5; // range < 1.5*ATR(14) for choppy
-input double InpRegime_ChoppyMAGapATRMult = 0.25;// |EMA20-EMA50| < 0.25*ATR(14)
-input int    InpRegime_ChoppyMinCrosses   = 3;   // min EMA8/LWMA20 crosses in lookback
+const bool   InpRegime_DetectChoppy   = true;
+const int    InpRegime_ChoppyLookback = 24;      // bars for range / cross-count
+const double InpRegime_ChoppyRangeATRMult = 1.5; // range < 1.5*ATR(14) for choppy
+const double InpRegime_ChoppyMAGapATRMult = 0.25;// |EMA20-EMA50| < 0.25*ATR(14)
+const int    InpRegime_ChoppyMinCrosses   = 3;   // min EMA8/LWMA20 crosses in lookback
 // --- Ranging regime detection ---
-input bool   InpRegime_DetectRanging  = true;
-input int    InpRegime_RangingLookback = 24;
-input double InpRegime_RangingSizeATRMult = 1.5; // RangeSize >= 1.5*ATR(14)
-input double InpRegime_RangingMidLo  = 0.40;     // block when PricePos in [Lo,Hi]
-input double InpRegime_RangingMidHi  = 0.60;
-input double InpRegime_RangingER_Max = 0.35;
+const bool   InpRegime_DetectRanging  = true;
+const int    InpRegime_RangingLookback = 24;
+const double InpRegime_RangingSizeATRMult = 1.5; // RangeSize >= 1.5*ATR(14)
+const double InpRegime_RangingMidLo  = 0.40;     // block when PricePos in [Lo,Hi]
+const double InpRegime_RangingMidHi  = 0.60;
+const double InpRegime_RangingER_Max = 0.35;
 // --- Long Ranging detection (extended consolidation) ---
-input bool   InpRegime_DetectLongRanging  = true;
-input int    InpRegime_LongRangeLookbackM1 = 80;
-input int    InpRegime_LongRangeLookbackM5 = 48;
-input double InpRegime_LongRangeEMA50FlatATRMult = 0.20; // |EMA50[0]-EMA50[10]| < 0.20*ATR
-input double InpRegime_LongRangeAvgERMax = 0.30;          // mean of last 3 ER samples
-input double InpRegime_LongRangeBreakoutBufATRMult = 0.20;
+const bool   InpRegime_DetectLongRanging  = true;
+const int    InpRegime_LongRangeLookbackM1 = 80;
+const int    InpRegime_LongRangeLookbackM5 = 48;
+const double InpRegime_LongRangeEMA50FlatATRMult = 0.20; // |EMA50[0]-EMA50[10]| < 0.20*ATR
+const double InpRegime_LongRangeAvgERMax = 0.30;          // mean of last 3 ER samples
+const double InpRegime_LongRangeBreakoutBufATRMult = 0.20;
 // --- Early Breakout detection ---
-input bool   InpRegime_DetectEarlyBreakout = true;
-input double InpRegime_EarlyBreakoutADXMax = 22.0;
-input int    InpRegime_EarlyBreakoutADXSlopeBars = 3;
-input double InpRegime_EarlyBreakoutER_Min = 0.30;
-input double InpRegime_EarlyBreakoutATRFastRatio = 1.10;  // ATR(5) >= 1.10 * ATR(20)
-input int    InpRegime_EarlyBreakoutRangeBars = 20;
-input double InpRegime_EarlyBreakoutBufATRMult = 0.10;
-input double InpRegime_EarlyBreakoutMinBodyRatio = 0.50;
-input double InpRegime_EarlyBreakoutMaxWickBodyMult = 1.5;
-input double InpRegime_EarlyBreakoutLotMult = 0.5;        // 0.5x lot when in early breakout
+const bool   InpRegime_DetectEarlyBreakout = true;
+const double InpRegime_EarlyBreakoutADXMax = 22.0;
+const int    InpRegime_EarlyBreakoutADXSlopeBars = 3;
+const double InpRegime_EarlyBreakoutER_Min = 0.30;
+const double InpRegime_EarlyBreakoutATRFastRatio = 1.10;  // ATR(5) >= 1.10 * ATR(20)
+const int    InpRegime_EarlyBreakoutRangeBars = 20;
+const double InpRegime_EarlyBreakoutBufATRMult = 0.10;
+const double InpRegime_EarlyBreakoutMinBodyRatio = 0.50;
+const double InpRegime_EarlyBreakoutMaxWickBodyMult = 1.5;
+const double InpRegime_EarlyBreakoutLotMult = 0.5;        // 0.5x lot when in early breakout
 // --- Confirmed Trend detection ---
-input bool   InpRegime_DetectConfirmedTrend = true;
-input int    InpRegime_ConfirmedSlowSlopeBars = 5;
-input int    InpRegime_ConfirmedFastSlopeBars = 3;
-input double InpRegime_ConfirmedMAGapATRMult  = 0.25;     // |EMA20-EMA50| > 0.25*ATR
-input double InpRegime_ConfirmedADXMin = 22.0;
-input double InpRegime_ConfirmedER_Min = 0.35;
+const bool   InpRegime_DetectConfirmedTrend = true;
+const int    InpRegime_ConfirmedSlowSlopeBars = 5;
+const int    InpRegime_ConfirmedFastSlopeBars = 3;
+const double InpRegime_ConfirmedMAGapATRMult  = 0.25;     // |EMA20-EMA50| > 0.25*ATR
+const double InpRegime_ConfirmedADXMin = 22.0;
+const double InpRegime_ConfirmedER_Min = 0.35;
 
 input group "=== Soft Mode TP/SL (when filter = SOFT) ==="
 input double InpSoft_TP1_Mult   = 0.4;
@@ -1350,6 +435,7 @@ double g_ema_fast=0, g_sma_slow=0, g_atr_val=0;
 double g_ema_fast_b0=0, g_sma_slow_b0=0;
 datetime g_last_bar_time=0; int g_current_bar=0;
 bool g_dash_visible=true, g_history_done=false, g_dashboard_dirty=true;
+bool g_vline_visual_initialized=false;
 double g_daily_loss=0, g_daily_profit=0; bool g_daily_blocked=false, g_daily_profit_blocked=false; datetime g_daily_date=0;
 ulong g_ea_ticket=0; int g_bars_in_trade=0, g_entry_bar=0, g_consec_loss=0;
 // Smart TP
@@ -1405,6 +491,15 @@ string g_last_decision="---"; // "V","S","B","D"
 
 // === F0 dashboard fix ===
 double g_last_signal_gap_pts=0;
+double g_slowma_angle_deg=0.0; bool g_slowma_angle_block=false; string g_slowma_angle_state="OFF";
+ENUM_SQUEEZE_STATE g_sq_state = SQ_NONE;
+double g_sq_range_high = 0.0;
+double g_sq_range_low = 0.0;
+string g_sq_reason = "";
+int    g_est_dir = 0;
+double g_est_band = 0.0;
+bool   g_est_noisy = false;
+string g_est_state = "OFF";
 
 // === v13.9.0 Wick / Liquidity Sweep state ===
 bool   g_wick_bad_sweep=false;
@@ -1557,7 +652,7 @@ bool LIC_VerifyOnce(){
     }
     string url = InpLicense_URL + "/backend/api/license/verify.php";
     long account = AccountInfoInteger(ACCOUNT_LOGIN);
-    string body = StringFormat("{\"account_number\":\"%I64u\",\"ea_version\":\"13.11.8\"}", (ulong)account);
+    string body = StringFormat("{\"account_number\":\"%I64u\",\"ea_version\":\"13.11.29\"}", (ulong)account);
     char post[]; StringToCharArray(body, post, 0, StringLen(body));
     char result[]; string headers="Content-Type: application/json\r\n"; string resp_headers;
     int timeout = 5000;
@@ -1662,6 +757,22 @@ void LIC_NukeAllOtherObjects(){
         for(int k = 0; k < 4; k++) if(n == keep[k]){ is_keep = true; break; }
         if(!is_keep) ObjectDelete(0, n);
     }
+}
+
+void CleanupAllEAObjects(){
+    // Defensive remove cleanup: delete every chart object created by this EA,
+    // including license overlay, dashboard, V-Line, MA ribbon, signal labels,
+    // TP/SL/Entry lines, F3 visuals, diagnostics, and exit markers.
+    for(int pass=0; pass<3; pass++){
+        int deleted=0;
+        for(int i=ObjectsTotal(0,0,-1)-1; i>=0; i--){
+            string n=ObjectName(0,i,0,-1);
+            if(StringFind(n,OBJ_PREFIX)==0){ ObjectDelete(0,n); deleted++; }
+        }
+        ObjectsDeleteAll(0,OBJ_PREFIX,-1,-1);
+        if(deleted==0) break;
+    }
+    LIC_ClearOverlay();
 }
 
 void LIC_DrawUnauthorizedOverlay(){
@@ -1793,6 +904,19 @@ void CheckLicence(){
 
 // === HELPERS ===
 string ObjName(string s){return OBJ_PREFIX+s;}
+
+void EnsureDashboardButton(){
+    string btn=ObjName("DASH_BTN");
+    if(ObjectFind(0,btn)<0) ObjectCreate(0,btn,OBJ_BUTTON,0,0,0);
+    ObjectSetInteger(0,btn,OBJPROP_CORNER,CORNER_RIGHT_UPPER);
+    ObjectSetInteger(0,btn,OBJPROP_XDISTANCE,90);ObjectSetInteger(0,btn,OBJPROP_YDISTANCE,24);
+    ObjectSetInteger(0,btn,OBJPROP_XSIZE,75);ObjectSetInteger(0,btn,OBJPROP_YSIZE,22);
+    ObjectSetString(0,btn,OBJPROP_TEXT,g_dash_visible?"HIDE":"SHOW");ObjectSetInteger(0,btn,OBJPROP_COLOR,clrWhite);
+    ObjectSetInteger(0,btn,OBJPROP_BGCOLOR,g_dash_visible?C'40,50,70':C'70,30,30');ObjectSetInteger(0,btn,OBJPROP_BORDER_COLOR,C'80,100,140');
+    ObjectSetString(0,btn,OBJPROP_FONT,"Arial");ObjectSetInteger(0,btn,OBJPROP_FONTSIZE,8);
+    ObjectSetInteger(0,btn,OBJPROP_BACK,false);ObjectSetInteger(0,btn,OBJPROP_ZORDER,1000);
+    ObjectSetInteger(0,btn,OBJPROP_SELECTABLE,false);ObjectSetInteger(0,btn,OBJPROP_HIDDEN,false);ObjectSetInteger(0,btn,OBJPROP_STATE,false);
+}
 double CalcLot(){
     double base = InpAutoLot
                   ? (AccountInfoDouble(ACCOUNT_BALANCE)/InpAutoLotDivider)/10.0
@@ -1928,12 +1052,12 @@ int OnInit(){
     g_history_done=false;g_last_signal=0;g_last_signal_bar=0;g_last_entry=0;g_entry_price=0;
     g_sl_price=0;g_sl_initial_dist=0;g_entry_atr=0;g_initial_lot=0;g_closed_lot_total=0;g_tp_unlocked=5;
     g_last_bar_time=0;g_current_bar=0;g_ea_ticket=0;g_entry_bar=0;g_bars_in_trade=0;g_consec_loss=0;
-    g_dashboard_dirty=true;g_awaiting_reentry=false;g_reentry_dir=0;g_reentry_reason="";
+    g_dashboard_dirty=true;g_vline_visual_initialized=false;g_awaiting_reentry=false;g_reentry_dir=0;g_reentry_reason="";
     g_sl_forced=false;g_ssl_phase=0;g_soft_mode=false;g_visual_signal=0;g_visual_entry=0;
     g_visual_sl=0;g_visual_atr=0;g_visual_tp_unlocked=5;g_peak_price=0;g_peak_bar=0;
     g_retest_armed=false;g_retest_dir=0;g_retest_counter=0;g_retest_seen_pullback=false;
     g_pipe_hard=false;g_pipe_soft=false;g_last_decision="---";
-    g_last_signal_gap_pts=0;
+    g_last_signal_gap_pts=0;g_slowma_angle_deg=0.0;g_slowma_angle_block=false;g_slowma_angle_state="OFF";
     g_f3_armed=false;g_f3_dir=0;g_f3_counter=0;g_f3_break_high=0;g_f3_break_low=0;g_f3_time=0;g_f3_reason="---";
     g_f3_fire_time=0;g_f3_fire_cross_px=0;g_f3_fire_atr=0;g_f3_fire_dir=0;
     g_pe_bep_armed=false;g_pe_entry_time=0;
@@ -2011,28 +1135,24 @@ int OnInit(){
             }
         }
     }
-    // v13.10.0 Market Regime — ATR fast/slow + EMA20/EMA50 (separate handles)
-    if(InpRegime_Enable){
+    // v13.10.0 Market Regime / ATR Health — ATR fast/slow + EMA20/EMA50 (separate handles)
+    if(InpRegime_Enable || InpUseATRHealthGuard){
         h_atr_fast = iATR(_Symbol,_Period,InpRegime_ATRFastPeriod);
         h_atr_slow = iATR(_Symbol,_Period,InpRegime_ATRSlowPeriod);
+        if(h_atr_fast==INVALID_HANDLE||h_atr_slow==INVALID_HANDLE){
+            Print("[ERROR] ATR fast/slow handles fail");return INIT_FAILED;
+        }
+    }
+    if(InpRegime_Enable){
         h_regime_ema_fast = iMA(_Symbol,_Period,InpRegime_EMA_Fast,0,MODE_EMA,PRICE_CLOSE);
         h_regime_ema_slow = iMA(_Symbol,_Period,InpRegime_EMA_Slow,0,MODE_EMA,PRICE_CLOSE);
-        if(h_atr_fast==INVALID_HANDLE||h_atr_slow==INVALID_HANDLE
-           ||h_regime_ema_fast==INVALID_HANDLE||h_regime_ema_slow==INVALID_HANDLE){
-            Print("[ERROR] Regime handles fail");return INIT_FAILED;
+        if(h_regime_ema_fast==INVALID_HANDLE||h_regime_ema_slow==INVALID_HANDLE){
+            Print("[ERROR] Regime EMA handles fail");return INIT_FAILED;
         }
     }
     CheckLicence();EventSetMillisecondTimer(500);
 
-    string btn=ObjName("DASH_BTN");ObjectCreate(0,btn,OBJ_BUTTON,0,0,0);
-    ObjectSetInteger(0,btn,OBJPROP_CORNER,CORNER_RIGHT_UPPER);
-    ObjectSetInteger(0,btn,OBJPROP_XDISTANCE,90);ObjectSetInteger(0,btn,OBJPROP_YDISTANCE,24);
-    ObjectSetInteger(0,btn,OBJPROP_XSIZE,75);ObjectSetInteger(0,btn,OBJPROP_YSIZE,22);
-    ObjectSetString(0,btn,OBJPROP_TEXT,"PANEL");ObjectSetInteger(0,btn,OBJPROP_COLOR,clrWhite);
-    ObjectSetInteger(0,btn,OBJPROP_BGCOLOR,C'40,50,70');ObjectSetInteger(0,btn,OBJPROP_BORDER_COLOR,C'80,100,140');
-    ObjectSetString(0,btn,OBJPROP_FONT,"Arial");ObjectSetInteger(0,btn,OBJPROP_FONTSIZE,8);
-    ObjectSetInteger(0,btn,OBJPROP_BACK,false);ObjectSetInteger(0,btn,OBJPROP_ZORDER,250);
-    ObjectSetInteger(0,btn,OBJPROP_SELECTABLE,false);ObjectSetInteger(0,btn,OBJPROP_STATE,false);
+    EnsureDashboardButton();
 
     ChartSetInteger(0,CHART_COLOR_BACKGROUND,C'0,0,0');ChartSetInteger(0,CHART_COLOR_FOREGROUND,clrWhite);
     ChartSetInteger(0,CHART_COLOR_CHART_UP,C'38,166,154');ChartSetInteger(0,CHART_COLOR_CHART_DOWN,C'239,83,80');
@@ -2040,7 +1160,7 @@ int OnInit(){
     ChartSetInteger(0,CHART_SHOW_GRID,false);ChartSetInteger(0,CHART_MODE,CHART_CANDLES);
 
     Print("==============================================================");
-    Print("[INIT] Dachi Trader v13.11.8 | ",_Symbol," ",EnumToString(_Period),
+    Print("[INIT] Dachi Trader v13.11.29 | ",_Symbol," ",EnumToString(_Period),
           " | Mode=",(InpIndicatorOnly?"INDICATOR":"EA ACTIVE"));
     string slmm=(InpSlowMA_Method==MODE_EMA?"EMA":InpSlowMA_Method==MODE_SMMA?"SMMA":InpSlowMA_Method==MODE_LWMA?"LWMA":"SMA");
     Print("[INIT] Core: EMA",InpEMA_Fast,"/",slmm,InpSMA_Slow," | ATR",InpATR_Period);
@@ -2077,8 +1197,8 @@ int OnInit(){
 
 void OnDeinit(const int reason){
     EventKillTimer();
-    if(reason==REASON_REMOVE){
-        ObjectsDeleteAll(0,OBJ_PREFIX,-1,-1);
+    if(reason==REASON_REMOVE || reason==REASON_CHARTCLOSE){
+        CleanupAllEAObjects();
         ChartRedraw();
     }
     if(h_ema_fast!=INVALID_HANDLE)IndicatorRelease(h_ema_fast);
@@ -2095,14 +1215,14 @@ void OnDeinit(const int reason){
     if(h_regime_ema_fast!=INVALID_HANDLE)IndicatorRelease(h_regime_ema_fast);
     if(h_regime_ema_slow!=INVALID_HANDLE)IndicatorRelease(h_regime_ema_slow);
     LIC_ClearOverlay();
-    Print("[DEINIT] Dachi v13.11.8 removed");
+    Print("[DEINIT] Dachi v13.11.29 removed");
 }
 
 void OnTimer(){
     if(!g_history_done){
         if(Bars(_Symbol,_Period)>InpSMA_Slow+50){
             g_history_done=true;g_current_bar=Bars(_Symbol,_Period);
-            ReadIndicators();DrawEMARibbon();ScanHistory();
+            ReadIndicators();DrawEMARibbon();DrawEvasiveSTVisual();ScanHistory();
             if(!InpIndicatorOnly)ReconcilePositionState();
             if(UseLateEntry()&&g_last_signal!=0&&HasActivePosition())CheckLateEntry();
             DrawTPSLLines();DrawDashboard(true);ChartRedraw();
@@ -2169,60 +1289,59 @@ bool ReadIndicators(){
 
 uint ComputeFilterHash(){
     uint h = 2166136261;  // FNV-1a seed
-    // Core MA — affects every crossing detection
+    // Clean-core signature only
     h = (h ^ (uint)InpEMA_Fast)            * 16777619;
     h = (h ^ (uint)InpSMA_Slow)            * 16777619;
     h = (h ^ (uint)InpSlowMA_Method)       * 16777619;
-    // Filter Actions (v13.10.0 renumbered set)
-    h = (h ^ (uint)InpGap_Action)          * 16777619;
-    h = (h ^ (uint)InpF1_Action)           * 16777619;
+    h = (h ^ (uint)(InpUseSlowMAAngleGuard?1:0)) * 16777619;
+    h = (h ^ (uint)(int)(InpSlowMA_MinAngleDeg*100)) * 16777619;
     h = (h ^ (uint)InpF2_Action)           * 16777619;
-    h = (h ^ (uint)InpF4_Action)           * 16777619;
-    h = (h ^ (uint)InpF5_Action)           * 16777619;
-    // F3 recovery + Wick + IF + Regime
-    h = (h ^ (uint)(InpF3_UseRecovery?1:0))*16777619;
-    h = (h ^ (uint)(InpF3_BlockOnF2?1:0))  *16777619;
-    h = (h ^ (uint)(int)(InpF3_MaxDistATR*100))*16777619;
-    h = (h ^ (uint)(InpF3_AllowRefire?1:0))*16777619;
-    h = (h ^ (uint)InpF3_RefireMaxBars)    *16777619;
-    h = (h ^ (uint)(int)(InpF3_RefireMaxDistATR*100))*16777619;
-    h = (h ^ (uint)(InpWick_UseFilter?1:0))* 16777619;
-    h = (h ^ (uint)(InpIF_Enable?1:0))     * 16777619;
-    h = (h ^ (uint)InpIF_TF)               * 16777619;
-    h = (h ^ (uint)(InpIF_UseExhaustion?1:0))*16777619;
-    h = (h ^ (uint)(InpRegime_Enable?1:0)) * 16777619;
-    // F0 threshold + ATR% mode
-    h = (h ^ (uint)InpGapPoints)                 * 16777619;
-    h = (h ^ (uint)(InpGap_UseATRPct?1:0))       * 16777619;
-    h = (h ^ (uint)(int)(InpGap_ATRPct*10))      * 16777619;
-    // F1 DI margin (was F7)
-    h = (h ^ (uint)(int)(InpF1_Margin*100))      * 16777619;
-    // F2 cross distance (was F9)
     h = (h ^ (uint)(int)(InpF2_MaxDistATR*100))  * 16777619;
-    // F4 slow MA direction (was F14)
-    h = (h ^ (uint)InpF4_LookbackBars)           * 16777619;
-    h = (h ^ (uint)(int)(InpF4_MinSlopePts*100)) * 16777619;
-    // F5 RVI OB/OS (was F15)
-    h = (h ^ (uint)InpF5_TF)                     * 16777619;
-    h = (h ^ (uint)InpF5_Period)                 * 16777619;
-    h = (h ^ (uint)(int)(InpF5_OBLevel*100))     * 16777619;
-    h = (h ^ (uint)(int)(InpF5_OSLevel*100))     * 16777619;
-    h = (h ^ (uint)(InpF5_UseSignalLine?1:0))    * 16777619;
-    // Regime tuning
-    h = (h ^ (uint)InpRegime_ATRFastPeriod)      * 16777619;
-    h = (h ^ (uint)InpRegime_ATRSlowPeriod)      * 16777619;
-    h = (h ^ (uint)InpRegime_ER_Period)          * 16777619;
-    h = (h ^ (uint)(int)(InpRegime_ER_ChoppyMax*100))  * 16777619;
-    h = (h ^ (uint)(int)(InpRegime_ER_NeutralMax*100)) * 16777619;
-    h = (h ^ (uint)(InpRegime_DetectChoppy?1:0))         * 16777619;
-    h = (h ^ (uint)(InpRegime_DetectRanging?1:0))        * 16777619;
-    h = (h ^ (uint)(InpRegime_DetectLongRanging?1:0))    * 16777619;
-    h = (h ^ (uint)(InpRegime_DetectEarlyBreakout?1:0))  * 16777619;
-    h = (h ^ (uint)(InpRegime_DetectConfirmedTrend?1:0)) * 16777619;
-    // v13.11.2 — fallback slope guard inputs
-    h = (h ^ (uint)InpRegime_FallbackSlopeBars)              * 16777619;
-    h = (h ^ (uint)(int)(InpRegime_FallbackSlopeATRMult*100))* 16777619;
-    h = (h ^ (uint)0x13C00080)             * 16777619;   // logic version marker
+
+    h = (h ^ (uint)(InpUseH1Bias?1:0))           * 16777619;
+    h = (h ^ (uint)(InpAllowNeutralBias?1:0))    * 16777619;
+    h = (h ^ (uint)(InpUseM15Setup?1:0))         * 16777619;
+    h = (h ^ (uint)(InpAllowM15Neutral?1:0))     * 16777619;
+    h = (h ^ (uint)InpStartupScanBars)        * 16777619;
+    h = (h ^ (uint)InpVisualLazyBars)          * 16777619;
+    h = (h ^ (uint)(InpShowCoreMALines?1:0)) * 16777619;
+    h = (h ^ (uint)(InpShowTPSLEntryLines?1:0)) * 16777619;
+    h = (h ^ (uint)(InpShowBlockedSignals?1:0)) * 16777619;
+    h = (h ^ (uint)(InpHTF_AllowReversalOverride?1:0)) * 16777619;
+    h = (h ^ (uint)(int)(InpHTF_ReversalBodyATRMin*100)) * 16777619;
+    h = (h ^ (uint)(InpUseVLineGuard?1:0)) * 16777619;
+    h = (h ^ (uint)InpVLine_TF) * 16777619;
+    h = (h ^ (uint)InpVLine_ATRLength) * 16777619;
+    h = (h ^ (uint)(int)(InpVLine_BaseMultiplier*100)) * 16777619;
+    h = (h ^ (uint)(int)(InpVLine_NoiseThresholdATR*100)) * 16777619;
+    h = (h ^ (uint)(int)(InpVLine_ExpansionAlphaATR*100)) * 16777619;
+    h = (h ^ (uint)(InpVLine_BlockNeutral?1:0)) * 16777619;
+    h = (h ^ (uint)(InpUseSidewayGuard?1:0)) * 16777619;
+    h = (h ^ (uint)(int)(InpSideway_MinEMASlopePts*100)) * 16777619;
+    h = (h ^ (uint)InpSideway_CrossLookback) * 16777619;
+    h = (h ^ (uint)InpSideway_MaxCrosses) * 16777619;
+    h = (h ^ (uint)(int)(InpSideway_MinMAGapATR*100)) * 16777619;
+    h = (h ^ (uint)(InpUseATRHealthGuard?1:0)) * 16777619;
+    h = (h ^ (uint)(int)(InpATR_M5_MinTrade*100)) * 16777619;
+    h = (h ^ (uint)(int)(InpATR_M5_MaxNormal*100)) * 16777619;
+    h = (h ^ (uint)(int)(InpATR_M5_MaxAllowed*100)) * 16777619;
+    h = (h ^ (uint)(int)(InpATR_M5_BlockAbove*100)) * 16777619;
+    h = (h ^ (uint)(int)(InpATR_FastRatioLimited*100)) * 16777619;
+    h = (h ^ (uint)(int)(InpATR_FastRatioBlock*100)) * 16777619;
+    h = (h ^ (uint)(InpUseSqueezeGuard?1:0)) * 16777619;
+    h = (h ^ (uint)InpSQ_Lookback) * 16777619;
+    h = (h ^ (uint)(int)(InpSQ_RangeATRMax*100)) * 16777619;
+    h = (h ^ (uint)(int)(InpSQ_ATRCompressionMax*100)) * 16777619;
+    h = (h ^ (uint)(int)(InpSQ_MAGapATRMax*100)) * 16777619;
+    h = (h ^ (uint)InpSQ_CrossDensityLookback) * 16777619;
+    h = (h ^ (uint)InpSQ_CrossDensityMin) * 16777619;
+    h = (h ^ (uint)(int)(InpSQ_BreakoutBufferATR*100)) * 16777619;
+    h = (h ^ (uint)(int)(InpSQ_MinBodyRatio*100)) * 16777619;
+    h = (h ^ (uint)(int)(InpSQ_BuyCloseLocMin*100)) * 16777619;
+    h = (h ^ (uint)(int)(InpSQ_SellCloseLocMax*100)) * 16777619;
+    h = (h ^ (uint)(int)(InpSQ_SpikeRatioBlock*100)) * 16777619;
+
+    h = (h ^ (uint)0x13C00290)             * 16777619;   // logic version marker
     return h;
 }
 
@@ -2355,550 +1474,7 @@ int F3CountRecentCrosses(){
 // === FILTER EVALUATORS ===
 
 // F0: EMA Gap (look-ahead bar 0)
-bool EvalF0(){
-    // v13.9.7 FIX: evaluate gap at the SIGNAL bar (bar 1, just-closed) instead
-    // of the FORMING bar (bar 0). The v13.7.x dashboard comment already
-    // claimed the filter matched g_last_signal_gap_pts, but the code was
-    // still reading _b0 (bar 0 forming) which can drift from bar 1 by the
-    // time the first ticks of the new bar arrive — explaining the field
-    // report of "dashboard shows 4 pips < 4.38 pips threshold yet SELL is
-    // not blocked". g_ema_fast / g_sma_slow are bar 1 values (set in
-    // ReadIndicators) so this matches both the dashboard and user
-    // expectation.
-    double gap_pts = MathAbs(g_ema_fast - g_sma_slow) / _Point;
-    double threshold;
-    if(InpGap_UseATRPct && g_atr_val > 0){
-        threshold = (g_atr_val / _Point) * InpGap_ATRPct / 100.0;
-    } else {
-        threshold = (double)InpGapPoints;
-    }
-    return (gap_pts < threshold);
-}
-
 // F4: Slow MA Direction (was F14 pre-v13.10.0) — lightweight visual check.
-bool EvalF4(int sig){
-    if(h_sma_slow == INVALID_HANDLE) return false;
-    int look = MathMax(1, InpF4_LookbackBars);
-    double s_now[1], s_back[1];
-    if(CopyBuffer(h_sma_slow, 0, 1,        1, s_now)  <= 0) return false;
-    if(CopyBuffer(h_sma_slow, 0, 1 + look, 1, s_back) <= 0) return false;
-    double slope_pts = (s_now[0] - s_back[0]) / _Point / (double)look;
-    g_f4_slope_pts   = slope_pts;
-    double min_slope = MathMax(0.0, InpF4_MinSlopePts);
-    if(sig ==  1) return (slope_pts <  +min_slope);
-    if(sig == -1) return (slope_pts >  -min_slope);
-    return false;
-}
-
-// F5: standalone RVI Overbought/Oversold filter (was F15 pre-v13.10.0).
-// Returns true to BLOCK the signal when momentum is over-extended in the
-// signal direction. Optional signal-line check adds a cross-direction
-// confirmation — block if RVI is also tilting against the momentum extreme.
-bool EvalF5(int sig){
-    if(h_f5_rvi==INVALID_HANDLE){g_f5_reason="NO_HANDLE";return false;}
-    double r[1];
-    if(CopyBuffer(h_f5_rvi,0,1,1,r)<=0){g_f5_reason="NO_DATA";return false;}
-    g_f5_val=r[0];
-    bool ob = (sig== 1 && r[0]> InpF5_OBLevel);
-    bool os = (sig==-1 && r[0]< InpF5_OSLevel);
-    bool extreme = ob || os;
-    bool sigline_fail=false;
-    if(InpF5_UseSignalLine){
-        double s[1];
-        if(CopyBuffer(h_f5_rvi,1,1,1,s)>0){
-            g_f5_sig_line=s[0];
-            if(sig== 1) sigline_fail=(r[0]<s[0]);
-            if(sig==-1) sigline_fail=(r[0]>s[0]);
-        }
-    }
-    if(extreme && sigline_fail){g_f5_reason=(sig==1?"OB+TILT":"OS+TILT");return true;}
-    if(extreme){g_f5_reason=(sig==1?"OB":"OS");return true;}
-    if(sigline_fail){g_f5_reason="TILT";return true;}
-    g_f5_reason="OK";
-    return false;
-}
-
-// Historical mirror for F5.
-bool EvalF5At(int sig,int chart_idx){
-    if(h_f5_rvi==INVALID_HANDLE) return false;
-    int hs=chart_idx;
-    if(InpF5_TF!=PERIOD_CURRENT && InpF5_TF!=_Period){
-        datetime t=iTime(_Symbol,_Period,chart_idx);
-        hs=iBarShift(_Symbol,InpF5_TF,t,false);
-        if(hs<0) return false;
-    }
-    double r[1];
-    if(CopyBuffer(h_f5_rvi,0,hs,1,r)<=0) return false;
-    bool ob = (sig== 1 && r[0]> InpF5_OBLevel);
-    bool os = (sig==-1 && r[0]< InpF5_OSLevel);
-    bool sigline_fail=false;
-    if(InpF5_UseSignalLine){
-        double s[1];
-        if(CopyBuffer(h_f5_rvi,1,hs,1,s)>0){
-            if(sig== 1) sigline_fail=(r[0]<s[0]);
-            if(sig==-1) sigline_fail=(r[0]>s[0]);
-        }
-    }
-    return (ob || os || sigline_fail);
-}
-
-// === v13.10.0 MARKET REGIME DETECTOR (issue #11; revised v13.11.0/v13.11.1) ==
-// Reads ATR fast/slow, Efficiency Ratio, EMA20/50, ADX/DI, range geometry,
-// and classifies the bar at `shift` into one of seven regimes:
-//   CHOPPY              — NO TRADE (block all entries)
-//   RANGING             — NO TRADE (v13.11.1: NEAR_HI/NEAR_LO exceptions removed)
-//   LONG_RANGING        — NO TRADE (v13.11.1: BREAKOUT exceptions removed)
-//   EARLY_BREAKOUT      — allow aligned with 0.5x lot (per issue rules)
-//   CONFIRMED_TREND     — best mode for MA crossing
-//   DIRECTIONAL         — v13.11.0 ER-fallback, ER ∈ [0.35, 0.55)
-//   STRONG_DIRECTIONAL  — v13.11.0 ER-fallback, ER ≥ 0.55
-// v13.11.0: the NO_CLASS limbo state is gone — pure-ER fallback assigns
-// CHOPPY (ER<0.20) / RANGING (ER<0.35) / DIRECTIONAL / STRONG_DIRECTIONAL
-// when no structural detector fires.
-// v13.11.1: RANGING/LONG_RANGING/weak-ER buckets all block unconditionally
-// per user spec — only EARLY_BR/DIR/STRONG_DIR/CONFIRMED tradeable.
-
-// State holder for regime classification at a given bar (shift).
-// Live path writes these into g_regime_* globals; historical ScanHistory
-// uses a stack-local RegimeState so it doesn't trample the live readout.
-struct RegimeState {
-    ENUM_REGIME regime;
-    string      reason;
-    bool        block;
-    double      lot_scale;
-    double      er;
-    double      atr_fast, atr_slow;
-    double      ema20, ema50;
-    double      ma_gap;
-    double      range;
-    double      pricepos;
-    int         cross_count;
-};
-
-// Map regime → signal class for chart labeling (v13.11.1 revised).
-// CHOPPY/RANGING/LONG_RANGING → BLOCKED (user spec: don't trade these).
-// EARLY_BREAKOUT → SOFT (LIMITED label; entry still per existing rules:
-//   aligned direction allowed with 0.5x lot, opposite direction blocked).
-// DIRECTIONAL/STRONG_DIRECTIONAL/CONFIRMED_TREND → VALID.
-ENUM_SIGNAL_CLASS RegimeLabelClass(ENUM_REGIME r){
-    // v13.11.7: keep regime guidance mostly as LIMITED so regime-only mode
-    // does not flood chart with BLOCKED labels in sideways sessions.
-    if(r==REG_CHOPPY || r==REG_RANGING || r==REG_LONG_RANGING || r==REG_EARLY_BREAKOUT) return SC_SOFT;
-    return SC_VALID;
-}
-
-// Combine filter signal-class with regime signal-class — harshest wins.
-// Rank BLOCKED(2) > SOFT(1) > VALID(0).
-ENUM_SIGNAL_CLASS CombineSignalClass(ENUM_SIGNAL_CLASS a, ENUM_SIGNAL_CLASS b){
-    int ra = (a==SC_BLOCKED?2:(a==SC_SOFT?1:0));
-    int rb = (b==SC_BLOCKED?2:(b==SC_SOFT?1:0));
-    int rmax = MathMax(ra,rb);
-    if(rmax==2) return SC_BLOCKED;
-    if(rmax==1) return SC_SOFT;
-    return SC_VALID;
-}
-
-double CalcEfficiencyRatio(int N, int shift=1){
-    if(N<2) N=2;
-    double cl[];ArraySetAsSeries(cl,true);
-    if(CopyClose(_Symbol,_Period,shift,N+1,cl)<N+1) return 0.0;
-    double net = MathAbs(cl[0] - cl[N]);
-    double path = 0.0;
-    for(int i=0;i<N;i++) path += MathAbs(cl[i] - cl[i+1]);
-    if(path<=0) return 0.0;
-    return net / path;
-}
-
-double CalcRegimeRange(int lookback, int idx, double &hh_out, double &ll_out){
-    int hi = iHighest(_Symbol,_Period,MODE_HIGH,lookback,idx);
-    int li = iLowest (_Symbol,_Period,MODE_LOW ,lookback,idx);
-    if(hi<0||li<0) return 0;
-    hh_out = iHigh(_Symbol,_Period,hi);
-    ll_out = iLow (_Symbol,_Period,li);
-    return hh_out - ll_out;
-}
-
-// Live call (anchor=1) counts crosses in bars 1..lookback. Historical at
-// anchor=X counts crosses in bars X..X+lookback-1.
-int CountCrossesIn(int lookback, int anchor=1){
-    int crosses=0;
-    for(int k=0;k<lookback;k++) if(DetectSignalAt(anchor+k)!=0) crosses++;
-    return crosses;
-}
-
-// Classify the bar at `shift` (1=most recent closed bar = live anchor).
-// Pure function — writes only to `st`. Used by both UpdateMarketRegime
-// (live) and ScanHistory (historical, shift>1).
-void ComputeRegimeAt(int shift, RegimeState &st){
-    st.regime = REG_UNKNOWN;
-    st.reason = "---";
-    st.block = false;
-    st.lot_scale = 1.0;
-    st.er = 0.0;
-    st.atr_fast = 0; st.atr_slow = 0;
-    st.ema20 = 0; st.ema50 = 0;
-    st.ma_gap = 0; st.range = 0;
-    st.pricepos = 0.5; st.cross_count = 0;
-
-    if(!InpRegime_Enable) return;
-    if(h_atr_fast==INVALID_HANDLE || h_atr_slow==INVALID_HANDLE
-       || h_regime_ema_fast==INVALID_HANDLE || h_regime_ema_slow==INVALID_HANDLE) return;
-
-    double af[1], as_[1], ef[1], es[1];
-    if(CopyBuffer(h_atr_fast,0,shift,1,af)<=0) return;
-    if(CopyBuffer(h_atr_slow,0,shift,1,as_)<=0) return;
-    if(CopyBuffer(h_regime_ema_fast,0,shift,1,ef)<=0) return;
-    if(CopyBuffer(h_regime_ema_slow,0,shift,1,es)<=0) return;
-    st.atr_fast = af[0];
-    st.atr_slow = as_[0];
-    st.ema20    = ef[0];
-    st.ema50    = es[0];
-    st.ma_gap   = MathAbs(ef[0] - es[0]);
-
-    // ATR(14) at shift — for live (shift==1) g_atr_val is the same value.
-    double atr14 = af[0];
-    if(h_atr != INVALID_HANDLE){
-        double atrbuf[1];
-        if(CopyBuffer(h_atr,0,shift,1,atrbuf)>0 && atrbuf[0]>0) atr14 = atrbuf[0];
-    }
-    st.er = CalcEfficiencyRatio(InpRegime_ER_Period, shift);
-
-    // Range geometry over choppy/ranging lookbacks
-    double hh=0, ll=0;
-    double range = CalcRegimeRange(InpRegime_ChoppyLookback, shift, hh, ll);
-    st.range = range;
-    double cur_close = iClose(_Symbol,_Period,shift);
-    if(range>0) st.pricepos = (cur_close - ll)/range;
-    else        st.pricepos = 0.5;
-    st.cross_count = CountCrossesIn(20, shift);
-
-    // 1. CHOPPY detection (highest priority)
-    if(InpRegime_DetectChoppy){
-        bool ch_range   = (range < InpRegime_ChoppyRangeATRMult * atr14);
-        bool ch_ma_gap  = (st.ma_gap < InpRegime_ChoppyMAGapATRMult * atr14);
-        bool ch_er      = (st.er < InpRegime_ER_ChoppyMax);
-        bool ch_cross   = (st.cross_count >= InpRegime_ChoppyMinCrosses);
-        if(ch_range && ch_ma_gap && ch_er && ch_cross){
-            st.regime = REG_CHOPPY;
-            st.reason = "NO_TRADE";
-            st.block = true;
-            return;
-        }
-    }
-
-    // 5. CONFIRMED_TREND (check before ranging — strong trend overrides range)
-    if(InpRegime_DetectConfirmedTrend){
-        double ef50_old[1];
-        bool slow_slope_ok=false, fast_slope_ok=false, ma_gap_ok=false;
-        if(CopyBuffer(h_regime_ema_slow,0,shift+InpRegime_ConfirmedSlowSlopeBars,1,ef50_old)>0){
-            double dso = ef50_old[0];
-            if(ef[0]>es[0] && es[0]>dso) slow_slope_ok=true;
-            if(ef[0]<es[0] && es[0]<dso) slow_slope_ok=true;
-        }
-        double ef20_old[1];
-        if(CopyBuffer(h_regime_ema_fast,0,shift+InpRegime_ConfirmedFastSlopeBars,1,ef20_old)>0){
-            double dfo = ef20_old[0];
-            if(ef[0]>es[0] && ef[0]>dfo) fast_slope_ok=true;
-            if(ef[0]<es[0] && ef[0]<dfo) fast_slope_ok=true;
-        }
-        ma_gap_ok = (st.ma_gap > InpRegime_ConfirmedMAGapATRMult * atr14);
-        double adx_val=0;
-        if(h_adx!=INVALID_HANDLE){
-            double ab[1]; if(CopyBuffer(h_adx,0,shift,1,ab)>0) adx_val=ab[0];
-        }
-        bool adx_ok = (adx_val >= InpRegime_ConfirmedADXMin);
-        bool er_ok  = (st.er >= InpRegime_ConfirmedER_Min);
-        if(slow_slope_ok && fast_slope_ok && ma_gap_ok && adx_ok && er_ok){
-            st.regime = REG_CONFIRMED_TREND;
-            st.reason = (ef[0]>es[0])?"TREND_UP":"TREND_DN";
-            st.block = false;
-            return;
-        }
-    }
-
-    // 3. LONG_RANGING (detect before normal ranging — wider lookback)
-    if(InpRegime_DetectLongRanging){
-        int lr_look = (_Period==PERIOD_M1) ? InpRegime_LongRangeLookbackM1
-                                            : InpRegime_LongRangeLookbackM5;
-        double lr_hh=0, lr_ll=0;
-        double lr_range = CalcRegimeRange(lr_look, shift+1, lr_hh, lr_ll);
-        double es_old[1];
-        bool ema50_flat=false;
-        if(CopyBuffer(h_regime_ema_slow,0,shift+10,1,es_old)>0){
-            double ema50_delta = MathAbs(es[0] - es_old[0]);
-            ema50_flat = (ema50_delta < InpRegime_LongRangeEMA50FlatATRMult * atr14);
-        }
-        bool er_low = (st.er < InpRegime_LongRangeAvgERMax);
-        if(ema50_flat && er_low && lr_range>0){
-            st.regime = REG_LONG_RANGING;
-            double buf = InpRegime_LongRangeBreakoutBufATRMult * atr14;
-            bool buy_breakout  = (cur_close > lr_hh + buf);
-            bool sell_breakout = (cur_close < lr_ll - buf);
-            bool inside = (cur_close <= lr_hh && cur_close >= lr_ll);
-            if(buy_breakout) st.reason = "BREAKOUT_UP";
-            else if(sell_breakout) st.reason = "BREAKOUT_DN";
-            else if(inside) st.reason = "LONG_RANGE_MID";
-            else st.reason = "LONG_RANGE_EDGE";
-            st.block = false;
-            return;
-        }
-    }
-
-    // 4. EARLY_BREAKOUT
-    if(InpRegime_DetectEarlyBreakout){
-        double adx_val=0, adx_old[1];
-        if(h_adx!=INVALID_HANDLE){
-            double ab[1]; if(CopyBuffer(h_adx,0,shift,1,ab)>0) adx_val=ab[0];
-        }
-        bool adx_low = (adx_val < InpRegime_EarlyBreakoutADXMax);
-        bool adx_rising = false;
-        if(h_adx!=INVALID_HANDLE && CopyBuffer(h_adx,0,shift+InpRegime_EarlyBreakoutADXSlopeBars,1,adx_old)>0)
-            adx_rising = (adx_val > adx_old[0]);
-        // DI± at `shift` — live shift==1 matches g_f1_dip/dim semantic.
-        double di_p=0, di_m=0;
-        if(h_adx!=INVALID_HANDLE){
-            double dp[1], dm[1];
-            if(CopyBuffer(h_adx,1,shift,1,dp)>0) di_p=dp[0];
-            if(CopyBuffer(h_adx,2,shift,1,dm)>0) di_m=dm[0];
-        }
-        bool di_widening = (MathAbs(di_p - di_m) > 4.0);
-        bool er_ok = (st.er > InpRegime_EarlyBreakoutER_Min);
-        bool atr_expanding = (st.atr_slow>0
-                              && st.atr_fast >= InpRegime_EarlyBreakoutATRFastRatio * st.atr_slow);
-        double pr_hh=0, pr_ll=0;
-        double pr_range = CalcRegimeRange(InpRegime_EarlyBreakoutRangeBars, shift+1, pr_hh, pr_ll);
-        double buf = InpRegime_EarlyBreakoutBufATRMult * atr14;
-        bool buy_break  = (cur_close > pr_hh + buf);
-        bool sell_break = (cur_close < pr_ll - buf);
-        double bh=iHigh(_Symbol,_Period,shift), bl=iLow(_Symbol,_Period,shift);
-        double bo=iOpen(_Symbol,_Period,shift), bc=iClose(_Symbol,_Period,shift);
-        double brange = bh-bl, body=MathAbs(bc-bo);
-        bool body_ok=false, wick_ok=false;
-        if(brange>0){
-            body_ok = (body/brange >= InpRegime_EarlyBreakoutMinBodyRatio);
-            double top_body=MathMax(bo,bc), bot_body=MathMin(bo,bc);
-            double upper_wick=bh-top_body, lower_wick=bot_body-bl;
-            if(bc>bo) wick_ok = (upper_wick <= body * InpRegime_EarlyBreakoutMaxWickBodyMult);
-            else      wick_ok = (lower_wick <= body * InpRegime_EarlyBreakoutMaxWickBodyMult);
-        }
-        if(adx_low && adx_rising && di_widening && er_ok && atr_expanding
-           && (buy_break || sell_break) && body_ok && wick_ok){
-            st.regime = REG_EARLY_BREAKOUT;
-            st.reason = buy_break?"EARLY_BR_UP":"EARLY_BR_DN";
-            st.block = false;
-            st.lot_scale = MathMax(0.1, InpRegime_EarlyBreakoutLotMult);
-            return;
-        }
-    }
-
-    // 2. RANGING (normal range)
-    if(InpRegime_DetectRanging){
-        bool range_size_ok = (range >= InpRegime_RangingSizeATRMult * atr14);
-        bool ema50_flat=false;
-        double es_old[1];
-        if(CopyBuffer(h_regime_ema_slow,0,shift+5,1,es_old)>0){
-            double ema50_delta = MathAbs(es[0] - es_old[0]);
-            ema50_flat = (ema50_delta < 0.15 * atr14);
-        }
-        bool er_low = (st.er < InpRegime_RangingER_Max);
-        bool inside = (cur_close <= hh && cur_close >= ll);
-        if(range_size_ok && ema50_flat && er_low && inside){
-            st.regime = REG_RANGING;
-            // v13.11.1 — RANGING always blocks regardless of pricepos.
-            // Reason string preserved for diagnostics only.
-            if(st.pricepos >= InpRegime_RangingMidLo
-               && st.pricepos <= InpRegime_RangingMidHi)
-                st.reason = "MID_RANGE";
-            else
-                st.reason = (st.pricepos>InpRegime_RangingMidHi)?"NEAR_HI":"NEAR_LO";
-            st.block = true;
-            return;
-        }
-    }
-
-    // v13.11.0 — pure-ER fallback (was NO_CLASS in v13.10.x). When no
-    // structural detector matched, classify by ER tier alone.
-    // v13.11.2 — added EMA50 slope guard so pullback bars inside a strong
-    // trend (local ER drops below 0.35 but EMA50 still sloping clearly)
-    // do not get demoted to WEAK_ER RANGING (blocked). Threshold:
-    // |EMA50(shift) - EMA50(shift+10)| >= 0.30 * ATR14 → directional slope.
-    double es_slope_old[1];
-    bool slope_directional = false;
-    if(CopyBuffer(h_regime_ema_slow,0,shift+InpRegime_FallbackSlopeBars,1,es_slope_old)>0){
-        double ema50_delta = MathAbs(es[0] - es_slope_old[0]);
-        slope_directional = (ema50_delta >= InpRegime_FallbackSlopeATRMult * atr14);
-    }
-    if(st.er >= InpRegime_ER_StrongDirMin){
-        st.regime = REG_STRONG_DIRECTIONAL;
-        st.reason = "STRONG_DIR";
-        st.block = false;
-    } else if(st.er >= InpRegime_ER_DirectionalMin){
-        st.regime = REG_DIRECTIONAL;
-        st.reason = "DIR_ER";
-        st.block = false;
-    } else if(st.er >= InpRegime_ER_ChoppyMax){
-        // v13.11.2 — WEAK_ER bucket: if EMA50 slope is clearly directional,
-        // treat as DIRECTIONAL (pullback within trend) instead of RANGING.
-        if(slope_directional){
-            st.regime = REG_DIRECTIONAL;
-            st.reason = "DIR_BY_SLOPE";
-            st.block = false;
-        } else {
-            st.regime = REG_RANGING;
-            st.reason = "WEAK_ER";
-            st.block = true;          // v13.11.1 — weak-ER ranging blocks
-        }
-    } else {
-        st.regime = REG_CHOPPY;
-        st.reason = "CHOPPY_ER";
-        st.block = false;
-    }
-}
-
-// Live wrapper — classify bar 1 and copy state into g_regime_* globals.
-void UpdateMarketRegime(){
-    g_regime = REG_UNKNOWN;
-    g_regime_reason = "---";
-    g_regime_lot_scale = 1.0;
-    g_regime_block = false;
-    if(!InpRegime_Enable) return;
-    RegimeState st;
-    ComputeRegimeAt(1, st);
-    g_regime           = st.regime;
-    g_regime_reason    = st.reason;
-    g_regime_block     = st.block;
-    g_regime_lot_scale = st.lot_scale;
-    g_regime_er        = st.er;
-    g_regime_atr_fast  = st.atr_fast;
-    g_regime_atr_slow  = st.atr_slow;
-    g_regime_ema20     = st.ema20;
-    g_regime_ema50     = st.ema50;
-    g_regime_ma_gap    = st.ma_gap;
-    g_regime_range     = st.range;
-    g_regime_pricepos  = st.pricepos;
-    g_regime_cross_count = st.cross_count;
-}
-
-bool MarketRegimeBlocks(int sig){
-    if(!InpRegime_Enable) return false;
-    // v13.11.7: avoid blanket regime blocking. Only block explicit opposite-
-    // direction breakout calls; all other regimes are non-blocking guidance.
-
-    if(g_regime == REG_LONG_RANGING){
-        if(g_regime_reason == "BREAKOUT_UP" && sig == -1) return true;
-        if(g_regime_reason == "BREAKOUT_DN" && sig ==  1) return true;
-        return false;
-    }
-
-    if(g_regime == REG_EARLY_BREAKOUT){
-        if(g_regime_reason == "EARLY_BR_UP" && sig == -1) return true;
-        if(g_regime_reason == "EARLY_BR_DN" && sig ==  1) return true;
-        return false;
-    }
-
-    if(g_regime == REG_DIRECTIONAL ||
-       g_regime == REG_STRONG_DIRECTIONAL ||
-       g_regime == REG_CONFIRMED_TREND) return false;
-
-    return false;
-}
-
-// === Intelligent Filter ====================================================
-// Self-contained EMA20/50 short-trend gate. Returns true to BLOCK the signal.
-// Helper used by both live (idx=1) and historical (idx=chart_idx) paths.
-// Behaviour summary:
-//   - If filter disabled → never blocks.
-//   - Determine trend from EMA20 vs EMA50.
-//   - Signal aligns with trend → allow.
-//   - Signal counter-trend with price outside the EMA band → block.
-//   - Signal counter-trend with price between EMA20/EMA50:
-//       UseExhaustion=false → block.
-//       UseExhaustion=true  → allow only when opposing trend is exhausted
-//                             (RVI > 0.5 / < -0.5  OR  Stochastic %K > 80 / < 20).
-bool EvalIntelligentFilter(int sig, int idx){
-    // v13.9.17 — set dashboard state only when called live (idx==1) so
-    // historical ScanHistory passes don't trample the live readout.
-    bool live = (idx == 1);
-    if(!InpIF_Enable){
-        if(live){ g_if_trend = "---"; g_if_state = "---"; g_if_block = false; }
-        return false;
-    }
-    if(h_if_ema20 == INVALID_HANDLE || h_if_ema50 == INVALID_HANDLE){
-        if(live){ g_if_trend = "NOHANDLE"; g_if_state = "---"; g_if_block = false; }
-        return false;
-    }
-    // Project to IF TF when not the chart TF.
-    ENUM_TIMEFRAMES iftf = (InpIF_TF == PERIOD_CURRENT) ? _Period : InpIF_TF;
-    int hs = idx;
-    if(iftf != _Period){
-        datetime t = iTime(_Symbol, _Period, idx);
-        hs = iBarShift(_Symbol, iftf, t, false);
-        if(hs < 0){
-            if(live){ g_if_trend = "NOBAR"; g_if_state = "---"; g_if_block = false; }
-            return false;
-        }
-    }
-    double e20[1], e50[1];
-    if(CopyBuffer(h_if_ema20, 0, hs, 1, e20) <= 0){
-        if(live){ g_if_trend = "NODATA"; g_if_state = "---"; g_if_block = false; }
-        return false;
-    }
-    if(CopyBuffer(h_if_ema50, 0, hs, 1, e50) <= 0){
-        if(live){ g_if_trend = "NODATA"; g_if_state = "---"; g_if_block = false; }
-        return false;
-    }
-
-    double price = iClose(_Symbol, _Period, idx);
-    bool uptrend   = (e20[0] > e50[0]);
-    bool downtrend = (e20[0] < e50[0]);
-    if(live) g_if_trend = uptrend ? "UP" : (downtrend ? "DN" : "FLAT");
-
-    // Signal aligns with trend → allow
-    if(sig ==  1 && uptrend){   if(live){ g_if_state = "ALIGN"; g_if_block = false; } return false; }
-    if(sig == -1 && downtrend){ if(live){ g_if_state = "ALIGN"; g_if_block = false; } return false; }
-    // Flat (e20 == e50): allow both directions (no trend bias)
-    if(!uptrend && !downtrend){ if(live){ g_if_state = "ALIGN"; g_if_block = false; } return false; }
-
-    // Counter-trend signal. Check if price is between the EMAs.
-    double band_hi = MathMax(e20[0], e50[0]);
-    double band_lo = MathMin(e20[0], e50[0]);
-    bool between   = (price >= band_lo && price <= band_hi);
-    if(!between){ if(live){ g_if_state = "OUT-BAND"; g_if_block = true; } return true; }
-
-    if(!InpIF_UseExhaustion){ if(live){ g_if_state = "BAND"; g_if_block = true; } return true; }
-
-    // Exhaustion check: RVI OR Stochastic at extreme against the prevailing trend.
-    bool rvi_exhausted   = false;
-    bool stoch_exhausted = false;
-    if(h_if_rvi != INVALID_HANDLE){
-        double r[1];
-        if(CopyBuffer(h_if_rvi, 0, hs, 1, r) > 0){
-            if(sig ==  1) rvi_exhausted = (r[0] < -0.5);  // BUY counter-trend in downtrend → need oversold RVI
-            if(sig == -1) rvi_exhausted = (r[0] > +0.5);  // SELL counter-trend in uptrend → need overbought RVI
-        }
-    }
-    if(h_if_stoch != INVALID_HANDLE){
-        double k[1];
-        if(CopyBuffer(h_if_stoch, 0, hs, 1, k) > 0){
-            if(sig ==  1) stoch_exhausted = (k[0] < 20.0);
-            if(sig == -1) stoch_exhausted = (k[0] > 80.0);
-        }
-    }
-    bool exhausted = rvi_exhausted || stoch_exhausted;
-    if(live){
-        g_if_state = exhausted ? "EXH-OK" : "EXH-NO";
-        g_if_block = !exhausted;
-    }
-    return !exhausted;   // not exhausted → block. exhausted → allow.
-}
-
-// F1: DI directional validation (was F7 pre-v13.10.0)
-bool EvalF1(int sig){
-    if(h_adx==INVALID_HANDLE)return false;
-    if(sig==1) return (g_f1_dim>g_f1_dip+InpF1_Margin); // BUY blocked if DI- dominant
-    else       return (g_f1_dip>g_f1_dim+InpF1_Margin); // SELL blocked if DI+ dominant
-}
-
 // F2: Crossing-to-entry distance filter (was F9 pre-v13.10.0).
 // Geometric cross via linear interpolation between bar idx and bar idx+1.
 
@@ -2939,6 +1515,59 @@ bool EvalF2At(int idx){
     return (dist > InpF2_MaxDistATR * atr_use);
 }
 bool EvalF2(){ return EvalF2At(1); }
+
+bool CalcSlowMAVisualAngleAt(int idx, double &angle_deg){
+    angle_deg=0.0;
+    double es[]; ArraySetAsSeries(es,true);
+    if(CopyBuffer(h_sma_slow,0,idx,2,es)<2) return false;
+
+    datetime t_new=iTime(_Symbol,_Period,idx);
+    datetime t_old=iTime(_Symbol,_Period,idx+1);
+    if(t_new<=0 || t_old<=0 || t_new==t_old) return false;
+
+    int x_old=0,y_old=0,x_new=0,y_new=0;
+    bool ok_old=ChartTimePriceToXY(0,0,t_old,es[1],x_old,y_old);
+    bool ok_new=ChartTimePriceToXY(0,0,t_new,es[0],x_new,y_new);
+    if(ok_old && ok_new && x_new!=x_old){
+        double dx=(double)(x_new-x_old);
+        double dy=(double)(y_old-y_new); // screen Y grows downward; positive dy means visually rising
+        angle_deg=MathArctan(dy/dx)*180.0/3.14159265358979323846;
+        return true;
+    }
+
+    int visible=(int)ChartGetInteger(0,CHART_VISIBLE_BARS);
+    int width=(int)ChartGetInteger(0,CHART_WIDTH_IN_PIXELS);
+    int height=(int)ChartGetInteger(0,CHART_HEIGHT_IN_PIXELS);
+    double pmin=ChartGetDouble(0,CHART_PRICE_MIN,0);
+    double pmax=ChartGetDouble(0,CHART_PRICE_MAX,0);
+    if(visible<=0 || width<=0 || height<=0 || pmax<=pmin) return false;
+
+    double dx=(double)width/(double)visible;
+    double dy=(es[0]-es[1])/(pmax-pmin)*(double)height;
+    if(dx<=0.0) return false;
+    angle_deg=MathArctan(dy/dx)*180.0/3.14159265358979323846;
+    return true;
+}
+
+bool SlowMAAngleBlocks(int sig, int idx){
+    g_slowma_angle_block=false;
+    g_slowma_angle_state=InpUseSlowMAAngleGuard?"ERR":"OFF";
+    g_slowma_angle_deg=0.0;
+    if(!InpUseSlowMAAngleGuard) return false;
+
+    double angle=0.0;
+    if(!CalcSlowMAVisualAngleAt(idx,angle)){
+        g_slowma_angle_state="NO_DATA";
+        return false;
+    }
+
+    g_slowma_angle_deg=angle;
+    double th=MathMax(0.0,InpSlowMA_MinAngleDeg);
+    bool block=(sig>0 ? (angle < th) : (angle > -th));
+    g_slowma_angle_block=block;
+    g_slowma_angle_state=DoubleToString(angle,1)+"°";
+    return block;
+}
 
 // === F3 FALSE-BLOCK RECOVERY (was F11 pre-v13.10.0) ===
 // Gates (in order): cooldown after losing F3 → cross density (anti-sideway) →
@@ -3110,18 +1739,207 @@ int GetHTFDirection(ENUM_TIMEFRAMES tf, int idx){
     return 0;
 }
 
+bool IsReversalOverride(int sig, int idx){
+    if(!InpHTF_AllowReversalOverride) return false;
+    double o=iOpen(_Symbol,_Period,idx), c=iClose(_Symbol,_Period,idx), h=iHigh(_Symbol,_Period,idx), l=iLow(_Symbol,_Period,idx);
+    double atr[1]; if(CopyBuffer(h_atr,0,idx,1,atr)<=0 || atr[0]<=0) return false;
+    double body=MathAbs(c-o), range=MathMax(_Point,h-l);
+    bool strong_body = (body/atr[0] >= InpHTF_ReversalBodyATRMin);
+    bool strong_close = (sig==1)?(c > (l + 0.65*range)):(c < (h - 0.65*range));
+    return strong_body && strong_close;
+}
+
+// V-Line logic ported from user-provided Evasive SuperTrend PineScript (© LuxAlgo, CC BY-NC-SA 4.0).
+// Keep usage/distribution aligned with that license.
+bool BuildEvasiveSTSeries(ENUM_TIMEFRAMES tf, int bars, double &bands[], int &dirs[], bool &noisies[], bool &changed[]){
+    int period=MathMax(1, InpVLine_ATRLength);
+    int warmup=MathMax(300, period*30);
+    int need=bars+warmup+2;
+    if(bars<1 || Bars(_Symbol,tf)<=need) return false;
+
+    int hatr=iATR(_Symbol,tf,period);
+    if(hatr==INVALID_HANDLE) return false;
+
+    MqlRates rates[]; ArraySetAsSeries(rates,true);
+    double atr[]; ArraySetAsSeries(atr,true);
+    int copied_rates=CopyRates(_Symbol,tf,0,need,rates);
+    int copied_atr=CopyBuffer(hatr,0,0,need,atr);
+    IndicatorRelease(hatr);
+    if(copied_rates<need || copied_atr<need) return false;
+
+    ArrayResize(bands,bars+1);   ArraySetAsSeries(bands,true);
+    ArrayResize(dirs,bars+1);    ArraySetAsSeries(dirs,true);
+    ArrayResize(noisies,bars+1); ArraySetAsSeries(noisies,true);
+    ArrayResize(changed,bars+1); ArraySetAsSeries(changed,true);
+
+    double st_band=0.0;
+    bool has_band=false;
+    int trend=1;
+    int prev_trend=trend;
+    bool noisy=false;
+
+    for(int k=need-1; k>=0; k--){
+        if(rates[k].high<=0 || rates[k].low<=0 || rates[k].close<=0 || atr[k]<=0) return false;
+        double src=(rates[k].high+rates[k].low)*0.5;
+        double upper_base=src + InpVLine_BaseMultiplier*atr[k];
+        double lower_base=src - InpVLine_BaseMultiplier*atr[k];
+        double prev_band=has_band ? st_band : (trend==1 ? lower_base : upper_base);
+        prev_trend=trend;
+        noisy=(MathAbs(rates[k].close-prev_band) < (atr[k]*InpVLine_NoiseThresholdATR));
+
+        if(trend==1){
+            st_band = noisy ? (prev_band - atr[k]*InpVLine_ExpansionAlphaATR) : MathMax(lower_base, prev_band);
+            if(rates[k].close < st_band){ trend=-1; st_band=upper_base; }
+        } else {
+            st_band = noisy ? (prev_band + atr[k]*InpVLine_ExpansionAlphaATR) : MathMin(upper_base, prev_band);
+            if(rates[k].close > st_band){ trend=1; st_band=lower_base; }
+        }
+        has_band=true;
+
+        if(k<=bars){
+            bands[k]=st_band;
+            dirs[k]=trend;
+            noisies[k]=noisy;
+            changed[k]=(trend!=prev_trend);
+        }
+    }
+    return true;
+}
+
+bool CalcEvasiveSupertrendAt(ENUM_TIMEFRAMES tf, int idx, double &out_band, int &out_dir, bool &out_noisy, bool &out_changed){
+    out_band=0.0; out_dir=0; out_noisy=false; out_changed=false;
+    double bands[]; int dirs[]; bool noisies[]; bool changed[];
+    if(!BuildEvasiveSTSeries(tf,idx,bands,dirs,noisies,changed)) return false;
+    out_band=bands[idx];
+    out_dir=dirs[idx];
+    out_noisy=noisies[idx];
+    out_changed=changed[idx];
+    return true;
+}
+
+bool EvasiveSTBlocks(int sig, int idx){
+    g_est_dir=0; g_est_band=0.0; g_est_noisy=false; g_est_state=InpUseVLineGuard?"ERR":"OFF";
+    if(!InpUseVLineGuard) return false;
+    ENUM_TIMEFRAMES tf=(InpVLine_TF==PERIOD_CURRENT?_Period:InpVLine_TF);
+    int tf_shift=idx;
+    if(tf!=_Period){
+        datetime t=iTime(_Symbol,_Period,idx);
+        tf_shift=iBarShift(_Symbol,tf,t,false);
+        if(tf_shift<0){ g_est_state="NO_BAR"; return InpVLine_BlockNeutral; }
+    }
+    bool changed=false;
+    if(!CalcEvasiveSupertrendAt(tf,tf_shift,g_est_band,g_est_dir,g_est_noisy,changed)){
+        g_est_state="NO_DATA";
+        return InpVLine_BlockNeutral;
+    }
+    g_est_state=(g_est_dir>0?"BULL":"BEAR")+(g_est_noisy?" NOISE":"");
+    return (sig!=g_est_dir);
+}
+
+void ClearEvasiveSTVisual(){
+    for(int i=ObjectsTotal(0,0,-1)-1;i>=0;i--){
+        string n=ObjectName(0,i,0,-1);
+        if(StringFind(n,ObjName("EST_"))==0) ObjectDelete(0,n);
+    }
+}
+
+int GetLazyVisualBars(ENUM_TIMEFRAMES tf){
+    int base=MathMax(100,MathMin(InpVisualLazyBars,4000));
+    int visible=(int)ChartGetInteger(0,CHART_VISIBLE_BARS);
+    int first=(int)ChartGetInteger(0,CHART_FIRST_VISIBLE_BAR);
+    int chart_sec=PeriodSeconds(_Period), tf_sec=PeriodSeconds(tf);
+    int need=base;
+    if(visible>0 && first>=0 && chart_sec>0 && tf_sec>0){
+        int chart_need=first+visible+100;
+        need=(int)MathCeil((double)chart_need*(double)chart_sec/(double)tf_sec);
+        need=MathMax(base,need);
+    }
+    int available=Bars(_Symbol,tf)-MathMax(InpSMA_Slow,InpVLine_ATRLength)-5;
+    return MathMax(5,MathMin(need,MathMin(available,4000)));
+}
+
+void DrawEvasiveSTVisual(){
+    if(!InpVLine_ShowVisual){ ClearEvasiveSTVisual(); g_vline_visual_initialized=false; return; }
+    if(!g_vline_visual_initialized){ ClearEvasiveSTVisual(); g_vline_visual_initialized=true; }
+    ENUM_TIMEFRAMES tf=(InpVLine_TF==PERIOD_CURRENT?_Period:InpVLine_TF);
+    int bars=MathMax(InpVLine_VisualBars,GetLazyVisualBars(tf));
+    bars=MathMax(5,MathMin(bars,4000));
+    if(Bars(_Symbol,tf)<bars+InpVLine_ATRLength+20) bars=MathMax(5,Bars(_Symbol,tf)-InpVLine_ATRLength-25);
+    if(bars<5) return;
+
+    double bands[]; int dirs[]; bool noisies[]; bool changed[];
+    if(!BuildEvasiveSTSeries(tf,bars,bands,dirs,noisies,changed)) return;
+
+    for(int k=bars; k>=1; k--){
+        datetime t0=iTime(_Symbol,tf,k), t1=iTime(_Symbol,tf,k-1);
+        if(t0<=0 || t1<=0 || bands[k]<=0 || bands[k-1]<=0) continue;
+
+        string n=ObjName("EST_LINE_"+IntegerToString(k));
+        if(ObjectFind(0,n)<0) ObjectCreate(0,n,OBJ_TREND,0,t0,bands[k],t1,bands[k-1]);
+        else{
+            ObjectSetInteger(0,n,OBJPROP_TIME,0,t0);  ObjectSetDouble(0,n,OBJPROP_PRICE,0,bands[k]);
+            ObjectSetInteger(0,n,OBJPROP_TIME,1,t1);  ObjectSetDouble(0,n,OBJPROP_PRICE,1,bands[k-1]);
+        }
+        ObjectSetInteger(0,n,OBJPROP_COLOR,(dirs[k]>0?C'8,153,129':C'242,54,69'));
+        ObjectSetInteger(0,n,OBJPROP_WIDTH,2);
+        ObjectSetInteger(0,n,OBJPROP_STYLE,noisies[k]?STYLE_DOT:STYLE_SOLID);
+        ObjectSetInteger(0,n,OBJPROP_RAY_RIGHT,false);
+        ObjectSetInteger(0,n,OBJPROP_RAY_LEFT,false);
+        ObjectSetInteger(0,n,OBJPROP_BACK,false);
+        ObjectSetInteger(0,n,OBJPROP_SELECTABLE,false);
+        ObjectSetInteger(0,n,OBJPROP_HIDDEN,true);
+        ObjectSetInteger(0,n,OBJPROP_ZORDER,10);
+
+        if(InpVLine_ShowSwitchLabels && changed[k]){
+            string nl=ObjName("EST_LBL_"+IntegerToString(k));
+            if(ObjectFind(0,nl)<0) ObjectCreate(0,nl,OBJ_TEXT,0,t0,bands[k]);
+            else{ ObjectSetInteger(0,nl,OBJPROP_TIME,0,t0); ObjectSetDouble(0,nl,OBJPROP_PRICE,0,bands[k]); }
+            ObjectSetString(0,nl,OBJPROP_TEXT,(dirs[k]>0?"BULL":"BEAR"));
+            ObjectSetInteger(0,nl,OBJPROP_COLOR,(dirs[k]>0?C'8,153,129':C'242,54,69'));
+            ObjectSetString(0,nl,OBJPROP_FONT,"Arial Bold");
+            ObjectSetInteger(0,nl,OBJPROP_FONTSIZE,8);
+            ObjectSetInteger(0,nl,OBJPROP_ANCHOR,(dirs[k]>0?ANCHOR_LOWER:ANCHOR_UPPER));
+            ObjectSetInteger(0,nl,OBJPROP_SELECTABLE,false);
+            ObjectSetInteger(0,nl,OBJPROP_HIDDEN,true);
+            ObjectSetInteger(0,nl,OBJPROP_ZORDER,20);
+        }
+    }
+}
+
+bool SidewayBlocks(int sig, int idx){
+    if(!InpUseSidewayGuard) return false;
+    double e0[1], e4[1], s0[1];
+    if(CopyBuffer(h_ema_fast,0,idx,1,e0)<=0 || CopyBuffer(h_ema_fast,0,idx+4,1,e4)<=0 || CopyBuffer(h_sma_slow,0,idx,1,s0)<=0) return false;
+    double slope_pts = MathAbs((e0[0]-e4[0])/_Point)/4.0;
+
+    double atr[1];
+    if(CopyBuffer(h_atr,0,idx,1,atr)<=0 || atr[0]<=0) return (slope_pts < InpSideway_MinEMASlopePts);
+    double ma_gap_atr = MathAbs(e0[0]-s0[0]) / atr[0];
+
+    int crosses=0;
+    int look=MathMax(4, InpSideway_CrossLookback);
+    for(int k=idx; k<idx+look; k++) if(DetectSignalAt(k)!=0) crosses++;
+
+    bool flat = (slope_pts < InpSideway_MinEMASlopePts);
+    bool tight = (ma_gap_atr < InpSideway_MinMAGapATR);
+    bool noisy_cross = (crosses > InpSideway_MaxCrosses);
+    return (flat && tight) || (flat && noisy_cross) || (tight && noisy_cross);
+}
+
 bool HTFContextBlocks(int sig, int idx){
+    bool blocked=false;
     if(InpUseH1Bias){
         int h1 = GetHTFDirection(PERIOD_H1, idx);
-        if(h1==0 && !InpAllowNeutralBias) return true;
-        if(h1!=0 && sig!=h1) return true;
+        if(h1==0 && !InpAllowNeutralBias) blocked=true;
+        if(h1!=0 && sig!=h1) blocked=true;
     }
     if(InpUseM15Setup){
         int m15 = GetHTFDirection(PERIOD_M15, idx);
-        if(m15==0 && !InpAllowM15Neutral) return true;
-        if(m15!=0 && sig!=m15) return true;
+        if(m15==0 && !InpAllowM15Neutral) blocked=true;
+        if(m15!=0 && sig!=m15) blocked=true;
     }
-    return false;
+    if(blocked && IsReversalOverride(sig, idx)) return false;
+    return blocked;
 }
 
 // === PIPELINE (v13.10.0 simplified — no scoring, no judge) ===
@@ -3130,6 +1948,138 @@ bool HTFContextBlocks(int sig, int idx){
 // Enabled filters follow class effect: SOFT=>LIMITED, HARD=>BLOCKED.
 // Market Regime detector (when enabled) and Intelligent Filter are also
 // blocking gates when their conditions are met.
+string SqueezeStateToString(ENUM_SQUEEZE_STATE st){
+    switch(st){
+        case SQ_BUILDUP: return "BUILDUP";
+        case SQ_ARMED: return "ARMED";
+        case SQ_BREAKOUT_UP: return "BR_UP";
+        case SQ_BREAKOUT_DN: return "BR_DN";
+        case SQ_CONFIRMED_UP: return "CONF_UP";
+        case SQ_CONFIRMED_DN: return "CONF_DN";
+        case SQ_FALSE_BREAK: return "FALSE_BR";
+        case SQ_LOCKOUT: return "LOCKOUT";
+        default: return "NONE";
+    }
+}
+
+bool ReadATRSet(int idx, double &atr5, double &atr14, double &atr50){
+    atr5=0; atr14=0; atr50=0;
+    if(h_atr==INVALID_HANDLE || h_atr_fast==INVALID_HANDLE || h_atr_slow==INVALID_HANDLE) return false;
+    double a5[1], a14[1], a50[1];
+    if(CopyBuffer(h_atr_fast,0,idx,1,a5)<=0) return false;
+    if(CopyBuffer(h_atr,0,idx,1,a14)<=0) return false;
+    if(CopyBuffer(h_atr_slow,0,idx,1,a50)<=0) return false;
+    atr5=a5[0]; atr14=a14[0]; atr50=a50[0];
+    return (atr5>0 && atr14>0 && atr50>0);
+}
+
+bool ReadCoreMA(int idx, double &ema_fast, double &ma_slow){
+    ema_fast=0; ma_slow=0;
+    double ef[1], es[1];
+    if(CopyBuffer(h_ema_fast,0,idx,1,ef)<=0) return false;
+    if(CopyBuffer(h_sma_slow,0,idx,1,es)<=0) return false;
+    ema_fast=ef[0]; ma_slow=es[0];
+    return (ema_fast>0 && ma_slow>0);
+}
+
+bool CalcDonchianRange(int lookback, int shift_start, double &range_high, double &range_low){
+    range_high = -1.0e100;
+    range_low = 1.0e100;
+    int look = MathMax(2, lookback);
+    for(int i=shift_start; i<shift_start+look; i++){
+        double h=iHigh(_Symbol,_Period,i), l=iLow(_Symbol,_Period,i);
+        if(h<=0 || l<=0) return false;
+        if(h>range_high) range_high=h;
+        if(l<range_low) range_low=l;
+    }
+    return (range_high>range_low && range_low>0.0);
+}
+
+int CountCoreCrosses(int lookback, int shift_start){
+    int crosses=0;
+    int look=MathMax(2, lookback);
+    for(int i=shift_start; i<shift_start+look; i++) if(DetectSignalAt(i)!=0) crosses++;
+    return crosses;
+}
+
+bool IsSqueezeCompression(int shift, string &reason){
+    double hi, lo;
+    if(!CalcDonchianRange(InpSQ_Lookback, shift+1, hi, lo)){ reason="SQ_RANGE_FAIL"; return false; }
+    double atr5, atr14, atr50;
+    if(!ReadATRSet(shift, atr5, atr14, atr50)){ reason="SQ_ATR_FAIL"; return false; }
+    double ema_fast, ma_slow;
+    if(!ReadCoreMA(shift, ema_fast, ma_slow)){ reason="SQ_MA_FAIL"; return false; }
+    double range_atr=(hi-lo)/MathMax(atr14,_Point);
+    double atr_comp=atr14/MathMax(atr50,_Point);
+    double ma_gap_atr=MathAbs(ema_fast-ma_slow)/MathMax(atr14,_Point);
+    int crosses=CountCoreCrosses(InpSQ_CrossDensityLookback, shift+1);
+    g_sq_range_high=hi; g_sq_range_low=lo;
+    if(range_atr<=InpSQ_RangeATRMax && atr_comp<=InpSQ_ATRCompressionMax && ma_gap_atr<=InpSQ_MAGapATRMax && crosses>=InpSQ_CrossDensityMin){
+        reason="SQ_COMPRESS";
+        return true;
+    }
+    reason="SQ_NONE";
+    return false;
+}
+
+bool IsBreakoutQualityGood(int sig, int shift, string &reason){
+    double o=iOpen(_Symbol,_Period,shift), h=iHigh(_Symbol,_Period,shift), l=iLow(_Symbol,_Period,shift), c=iClose(_Symbol,_Period,shift);
+    double range=MathMax(h-l,_Point), body=MathAbs(c-o);
+    double body_ratio=body/range, close_loc=(c-l)/range;
+    double atr5, atr14, atr50;
+    if(!ReadATRSet(shift, atr5, atr14, atr50)){ reason="BR_ATR_FAIL"; return false; }
+    double fast_ratio=atr5/MathMax(atr14,_Point);
+    if(fast_ratio>InpSQ_SpikeRatioBlock){ reason="BR_SPIKE_CHAOS"; return false; }
+    if(body_ratio<InpSQ_MinBodyRatio){ reason="BR_WEAK_BODY"; return false; }
+    if(sig>0 && close_loc<InpSQ_BuyCloseLocMin){ reason="BR_BAD_CLOSE_BUY"; return false; }
+    if(sig<0 && close_loc>InpSQ_SellCloseLocMax){ reason="BR_BAD_CLOSE_SELL"; return false; }
+    reason="BR_QUALITY_OK";
+    return true;
+}
+
+ENUM_FILTER_DECISION EvalSqueezeGuard(int sig, int shift, string &state, string &reason){
+    state="OFF"; reason="SQ_OFF";
+    if(!InpUseSqueezeGuard){ g_sq_state=SQ_NONE; g_sq_reason=reason; return DEC_OK; }
+    string comp_reason="";
+    bool compressed=IsSqueezeCompression(shift, comp_reason);
+    double atr5, atr14, atr50;
+    if(!ReadATRSet(shift, atr5, atr14, atr50)){ g_sq_state=SQ_NONE; state="ERR"; reason="SQ_ATR_FAIL"; g_sq_reason=reason; return DEC_OK; }
+    double c=iClose(_Symbol,_Period,shift);
+    double buffer=InpSQ_BreakoutBufferATR*atr14;
+    bool br_up=compressed && c>(g_sq_range_high+buffer);
+    bool br_dn=compressed && c<(g_sq_range_low-buffer);
+    if(!compressed){ g_sq_state=SQ_NONE; state=SqueezeStateToString(g_sq_state); reason=comp_reason; g_sq_reason=reason; return DEC_OK; }
+    if(br_up || br_dn){
+        g_sq_state=br_up?SQ_BREAKOUT_UP:SQ_BREAKOUT_DN;
+        state=SqueezeStateToString(g_sq_state);
+        if((br_up && sig<0) || (br_dn && sig>0)){ reason=br_up?"SQ_OPPOSITE_SELL":"SQ_OPPOSITE_BUY"; g_sq_reason=reason; return DEC_BLOCKED; }
+        string br_reason="";
+        if(IsBreakoutQualityGood(sig, shift, br_reason)){ reason=br_reason; g_sq_reason=reason; return DEC_LIMITED; }
+        reason=br_reason; g_sq_reason=reason; g_sq_state=SQ_FALSE_BREAK; state=SqueezeStateToString(g_sq_state); return DEC_BLOCKED;
+    }
+    g_sq_state=SQ_ARMED;
+    state=SqueezeStateToString(g_sq_state);
+    reason="SQ_COMPRESS_BLOCK";
+    g_sq_reason=reason;
+    return DEC_BLOCKED;
+}
+
+ENUM_FILTER_DECISION EvalATRHealthAt(int idx, string &state){
+    state = "OFF";
+    if(!InpUseATRHealthGuard) return DEC_OK;
+    if(h_atr==INVALID_HANDLE || h_atr_fast==INVALID_HANDLE || h_atr_slow==INVALID_HANDLE) return DEC_OK;
+    double a14[1], a5[1], a50[1];
+    if(CopyBuffer(h_atr,0,idx,1,a14)<=0 || CopyBuffer(h_atr_fast,0,idx,1,a5)<=0 || CopyBuffer(h_atr_slow,0,idx,1,a50)<=0) return DEC_OK;
+    if(a14[0]<=0 || a50[0]<=0) return DEC_OK;
+    double atrVal = a14[0]; // price units, matching dashboard ATR and user inputs (e.g. XAU ATR 1.67)
+    double fastRatio = a5[0]/a14[0];
+    if(atrVal >= InpATR_M5_BlockAbove || fastRatio >= InpATR_FastRatioBlock){ state="CHAOS"; return DEC_BLOCKED; }
+    if(atrVal < InpATR_M5_MinTrade){ state="LOWVOL"; return DEC_LIMITED; }
+    if(atrVal > InpATR_M5_MaxAllowed){ state="TOO_HIGH"; return DEC_BLOCKED; }
+    if(atrVal > InpATR_M5_MaxNormal || fastRatio >= InpATR_FastRatioLimited){ state="LIMITED"; return DEC_LIMITED; }
+    state="OK"; return DEC_OK;
+}
+
 bool EvaluatePipeline(int sig){
     g_pipe_hard=false; g_pipe_soft=false;
     g_f0_trig=false;g_f1_trig=false;g_f2_trig=false;
@@ -3143,8 +2093,19 @@ bool EvaluatePipeline(int sig){
     }
 
     bool h_htf = HTFContextBlocks(sig, 1);
-    g_pipe_filter_hard = h_f2 || h_htf;
-    g_pipe_soft = false;
+    bool h_est = EvasiveSTBlocks(sig, 1);
+    bool h_slow_angle = SlowMAAngleBlocks(sig, 1);
+    bool h_sideway = SidewayBlocks(sig, 1);
+    string atr_state="";
+    ENUM_FILTER_DECISION atr_dec = EvalATRHealthAt(1, atr_state);
+    string sq_state="", sq_reason="";
+    ENUM_FILTER_DECISION sq_dec = EvalSqueezeGuard(sig, 1, sq_state, sq_reason);
+    bool h_atr = (atr_dec==DEC_BLOCKED);
+    bool s_atr = (atr_dec==DEC_LIMITED);
+    bool h_sq = (sq_dec==DEC_BLOCKED);
+    bool s_sq = (sq_dec==DEC_LIMITED);
+    g_pipe_filter_hard = h_f2 || h_htf || h_est || h_slow_angle || h_sideway || h_atr || h_sq;
+    g_pipe_soft = s_atr || s_sq;
     g_pipe_hard = g_pipe_filter_hard;
     return !g_pipe_hard;
 }
@@ -3155,6 +2116,17 @@ bool EvaluatePipelineAt(int idx, int sig, bool &out_hard, bool &out_soft){
     out_hard=false; out_soft=false;
     if(InpF2_Action!=F_OFF && EvalF2At(idx)) out_hard=true;
     if(HTFContextBlocks(sig, idx)) out_hard=true;
+    if(EvasiveSTBlocks(sig, idx)) out_hard=true;
+    if(SlowMAAngleBlocks(sig, idx)) out_hard=true;
+    if(SidewayBlocks(sig, idx)) out_hard=true;
+    string atr_state="";
+    ENUM_FILTER_DECISION atr_dec = EvalATRHealthAt(idx, atr_state);
+    if(atr_dec==DEC_BLOCKED) out_hard=true;
+    if(atr_dec==DEC_LIMITED) out_soft=true;
+    string sq_state="", sq_reason="";
+    ENUM_FILTER_DECISION sq_dec = EvalSqueezeGuard(sig, idx, sq_state, sq_reason);
+    if(sq_dec==DEC_BLOCKED) out_hard=true;
+    if(sq_dec==DEC_LIMITED) out_soft=true;
     return !out_hard;
 }
 
@@ -3897,8 +2869,21 @@ void DrawDiagMarker(int dir,datetime t,double price,string reason){
     ObjectSetInteger(0,nm,OBJPROP_SELECTABLE,false);ObjectSetInteger(0,nm,OBJPROP_HIDDEN,true);
 }
 
+bool ShouldShowSignalVisual(ENUM_SIGNAL_CLASS sc){
+    return (sc!=SC_BLOCKED || InpShowBlockedSignals);
+}
+
+void DeleteSignalVisualAt(datetime t){
+    string ts=IntegerToString((long)t);
+    ObjectDelete(0,ObjName("SIG_B_"+ts));
+    ObjectDelete(0,ObjName("SIG_S_"+ts));
+    ObjectDelete(0,ObjName("SIGBK_"+ts));
+    ObjectDelete(0,ObjName("SIGBAR_"+ts));
+}
+
 // DrawSignalLabel: class-aware label (VALID / LIMITED / BLOCKED)
 void DrawSignalLabel(int dir,datetime t,double price,ENUM_SIGNAL_CLASS sc){
+    if(sc==SC_BLOCKED && !InpShowBlockedSignals){ DeleteSignalVisualAt(t); return; }
     int bi=iBarShift(_Symbol,_Period,t);double a=g_atr_val>0?g_atr_val:5;
     string txt; color clr;
     switch(sc){
@@ -3953,9 +2938,19 @@ void ColorSignalCandle(int dir,datetime t){
     ObjectSetInteger(0,nl,OBJPROP_SELECTABLE,false);ObjectSetInteger(0,nl,OBJPROP_HIDDEN,true);
 }
 
+void ClearEMARibbonVisual(){
+    for(int i=ObjectsTotal(0,0,-1)-1;i>=0;i--){
+        string n=ObjectName(0,i,0,-1);
+        if(StringFind(n,ObjName("EFILL1_"))==0 || StringFind(n,ObjName("EFILL2_"))==0
+        || StringFind(n,ObjName("EF_"))==0 || StringFind(n,ObjName("ES_"))==0)
+            ObjectDelete(0,n);
+    }
+}
+
 // === EMA RIBBON ===
 void DrawEMARibbon(){
-    int bd=MathMin(500,Bars(_Symbol,_Period)-InpSMA_Slow-2);if(bd<=0)return;
+    if(!InpShowCoreMALines){ ClearEMARibbonVisual(); return; }
+    int bd=GetLazyVisualBars(_Period);if(bd<=0)return;
     double ef[],es[];ArraySetAsSeries(ef,true);ArraySetAsSeries(es,true);
     if(CopyBuffer(h_ema_fast,0,0,bd,ef)<bd)return;
     if(CopyBuffer(h_sma_slow,0,0,bd,es)<bd)return;
@@ -4011,14 +3006,22 @@ void UpdateVisualForSignal(int dir,double entry_price,double atr,bool tight_mode
     for(int i=0;i<MAX_TP;i++)g_visual_tp_hit[i]=false;
 }
 
+void ClearTPSLEntryLines(){
+    ObjectDelete(0,ObjName("ENTRY_LINE"));ObjectDelete(0,ObjName("SL_LINE"));
+    ObjectDelete(0,ObjName("ENTRY_LBL"));ObjectDelete(0,ObjName("SL_LBL"));
+    for(int i=0;i<MAX_TP;i++){
+        ObjectDelete(0,ObjName("TP"+IntegerToString(i+1)+"_L"));
+        ObjectDelete(0,ObjName("TP"+IntegerToString(i+1)+"_LBL"));
+    }
+}
+
 // === TP/SL LINES ===
 void DrawTPSLLines(){
+    if(!InpShowTPSLEntryLines){ ClearTPSLEntryLines(); return; }
     double de,ds,da;int dd,du;bool uv=false;
     if(g_last_signal!=0){dd=g_last_signal;de=g_entry_price;ds=g_sl_price;da=g_entry_atr;du=g_tp_unlocked;}
     else if(g_visual_signal!=0){dd=g_visual_signal;de=g_visual_entry;ds=g_visual_sl;da=g_visual_atr;du=g_visual_tp_unlocked;uv=true;}
-    else{ObjectDelete(0,ObjName("ENTRY_LINE"));ObjectDelete(0,ObjName("SL_LINE"));
-        ObjectDelete(0,ObjName("ENTRY_LBL"));ObjectDelete(0,ObjName("SL_LBL"));
-        for(int i=0;i<MAX_TP;i++){ObjectDelete(0,ObjName("TP"+IntegerToString(i+1)+"_L"));ObjectDelete(0,ObjName("TP"+IntegerToString(i+1)+"_LBL"));}return;}
+    else{ ClearTPSLEntryLines(); return; }
     datetime tl=iTime(_Symbol,_Period,0)+PeriodSeconds()*3;double lo=da*0.08;
     string ne=ObjName("ENTRY_LINE");if(ObjectFind(0,ne)<0)ObjectCreate(0,ne,OBJ_HLINE,0,0,de);
     ObjectSetDouble(0,ne,OBJPROP_PRICE,de);ObjectSetInteger(0,ne,OBJPROP_COLOR,uv?C'80,80,160':InpEntryColor);
@@ -4226,9 +3229,11 @@ void DrawF3RecoveryTPSL(int dir, datetime rt, double rp, double atr){
 
 // === SCAN HISTORY ===
 void ScanHistory(){
-    int total=Bars(_Symbol,_Period),scan=MathMin(total-InpSMA_Slow-5,4000);
+    int total=Bars(_Symbol,_Period),scan=MathMin(total-InpSMA_Slow-5,MathMax(200,MathMin(InpStartupScanBars,4000)));
     if(scan<3)return;Print("[SCAN] ",scan," bars...");
-    int sc=0,sc_blocked=0;
+    int sc=0,sc_blocked=0,sc_soft=0;
+    ENUM_SQUEEZE_STATE sq_save_state=g_sq_state; double sq_save_hi=g_sq_range_high, sq_save_lo=g_sq_range_low; string sq_save_reason=g_sq_reason;
+    int est_save_dir=g_est_dir; double est_save_band=g_est_band; bool est_save_noisy=g_est_noisy; string est_save_state=g_est_state;
     int last_dir=0; double last_entry=0, last_atr=0; bool last_tight=false;
     ENUM_SIGNAL_CLASS last_cls=SC_BLOCKED;
     bool has_last=false;
@@ -4250,12 +3255,13 @@ void ScanHistory(){
         // v13.11.0 — combine filter class with regime class (harshest wins).
         // ComputeRegimeAt(i, ...) evaluates regime at the historical bar so
         // the label history matches what would have been live at that bar.
-        ENUM_SIGNAL_CLASS filter_cls = hard ? SC_BLOCKED : SC_VALID;
+        ENUM_SIGNAL_CLASS filter_cls = hard ? SC_BLOCKED : (soft ? SC_SOFT : SC_VALID);
         ENUM_SIGNAL_CLASS sc_class = filter_cls;
         if(sc_class==SC_BLOCKED) sc_blocked++;
+        else if(sc_class==SC_SOFT) sc_soft++;
 
         DrawSignalLabel(sig,st,sp,sc_class);
-        ColorSignalCandle(sig,st);
+        if(ShouldShowSignalVisual(sc_class)) ColorSignalCandle(sig,st);
         // F3 recovery scan still uses the FILTER-level hard flag — regime
         // blocks (e.g. CHOPPY) are not eligible for F3 false-block recovery.
         if(hard){
@@ -4302,7 +3308,7 @@ void ScanHistory(){
         }
         g_atr_val=sv;
     }
-    Print("[SCAN] ",sc," crossovers | VALID=",(sc-sc_blocked)," BLOCKED=",sc_blocked);
+    Print("[SCAN] ",sc," crossovers | VALID=",(sc-sc_blocked-sc_soft)," LIMITED=",sc_soft," BLOCKED=",sc_blocked);
 
     ResetRuntimeTradeState(true);
     if(has_last&&last_cls!=SC_BLOCKED){
@@ -4313,6 +3319,8 @@ void ScanHistory(){
         ClearVisualTradeState();
     }
     g_entry_bar=g_current_bar;g_bars_in_trade=0;
+    g_sq_state=sq_save_state; g_sq_range_high=sq_save_hi; g_sq_range_low=sq_save_lo; g_sq_reason=sq_save_reason;
+    g_est_dir=est_save_dir; g_est_band=est_save_band; g_est_noisy=est_save_noisy; g_est_state=est_save_state;
 }
 
 // === DASHBOARD HELPERS ===
@@ -4373,12 +3381,13 @@ void DrawFilterRow(string id,int row,string label,ENUM_FILTER_ACTION action,bool
 
 // === DASHBOARD (31 rows) ===
 void DrawDashboard(bool force){
+    EnsureDashboardButton();
     static uint lms=0;uint now=GetTickCount();
     if(!force&&now-lms<500)return;lms=now;
     if(!g_dash_visible){
         for(int i=ObjectsTotal(0,0,-1)-1;i>=0;i--){string n=ObjectName(0,i,0,-1);if(StringFind(n,OBJ_PREFIX+"DB_")==0)ObjectDelete(0,n);}return;
     }
-    int nr=26,ph=(nr+1)*DB_LINE_H+DB_Y_BASE+8;
+    int nr=28,ph=(nr+1)*DB_LINE_H+DB_Y_BASE+8;
     string bg=ObjName("DB_BG");ObjectCreate(0,bg,OBJ_RECTANGLE_LABEL,0,0,0);
     ObjectSetInteger(0,bg,OBJPROP_CORNER,DB_CORNER);ObjectSetInteger(0,bg,OBJPROP_XDISTANCE,2);
     ObjectSetInteger(0,bg,OBJPROP_YDISTANCE,2+ph);ObjectSetInteger(0,bg,OBJPROP_XSIZE,DB_PANEL_W);
@@ -4401,17 +3410,32 @@ void DrawDashboard(bool force){
     // Clean Core dashboard: only F2 + HTF context gate
     int n_hard=0;
     if(InpF2_Action!=F_OFF && g_f2_trig) n_hard++;
-    bool htf_block = HTFContextBlocks((g_last_signal==0?1:g_last_signal), 1);
+    int dash_sig=(g_last_signal==0?1:g_last_signal);
+    bool htf_block = HTFContextBlocks(dash_sig, 1);
+    bool est_block = EvasiveSTBlocks(dash_sig,1);
+    bool slow_angle_block = SlowMAAngleBlocks(dash_sig,1);
+    bool side_block = SidewayBlocks(dash_sig,1);
+    string atr_state=""; ENUM_FILTER_DECISION atr_dec=EvalATRHealthAt(1,atr_state);
+    string sq_state="", sq_reason=""; ENUM_FILTER_DECISION sq_dec=EvalSqueezeGuard(dash_sig,1,sq_state,sq_reason);
     if(htf_block) n_hard++;
+    if(est_block) n_hard++;
+    if(slow_angle_block) n_hard++;
+    if(side_block) n_hard++;
+    if(atr_dec==DEC_BLOCKED) n_hard++;
+    if(sq_dec==DEC_BLOCKED) n_hard++;
     string fsum_val=IntegerToString(n_hard)+"H "+g_last_decision;
     color fsum_c=n_hard>0?DB_CLR_RED:DB_CLR_GREEN;
     DrawDR("FSUM",row++,"Filters",fsum_val,fsum_c,yb);
 
     DrawFilterRow("F2",row++,"F2 CrossDist",InpF2_Action,g_f2_trig,g_f2_trig?"FAR":"OK",yb);
 
-    string htfv = StringFormat("H1=%s M15=%s", InpUseH1Bias?"ON":"OFF", InpUseM15Setup?"ON":"OFF");
+    string htfv = StringFormat("H1=%s M15=%s RevOVR=%s", InpUseH1Bias?"ON":"OFF", InpUseM15Setup?"ON":"OFF", InpHTF_AllowReversalOverride?"ON":"OFF");
     DrawDR("HTF",row++,"HTF Gate", htf_block?"BLOCK":"PASS", htf_block?DB_CLR_RED:DB_CLR_GREEN, yb);
     DrawDR("HTFC",row++,"HTF Config", htfv, DB_CLR_CYAN, yb);
+    DrawDR("EST",row++,"V-Line", (InpUseVLineGuard?(g_est_state+" "+EnumToString(InpVLine_TF)):"OFF"), !InpUseVLineGuard?DB_CLR_GRAY:(est_block?DB_CLR_RED:(g_est_dir>0?DB_CLR_GREEN:DB_CLR_ORANGE)), yb);
+    DrawDR("SANG",row++,"SlowMA Angle", InpUseSlowMAAngleGuard?g_slowma_angle_state:"OFF", !InpUseSlowMAAngleGuard?DB_CLR_GRAY:(slow_angle_block?DB_CLR_RED:DB_CLR_GREEN), yb);
+    DrawDR("ATRH",row++,"ATR Health", InpUseATRHealthGuard?atr_state:"OFF", !InpUseATRHealthGuard?DB_CLR_GRAY:(atr_dec==DEC_BLOCKED?DB_CLR_RED:(atr_dec==DEC_LIMITED?DB_CLR_YELLOW:DB_CLR_GREEN)), yb);
+    DrawDR("SQ",row++,"Squeeze", SqueezeStateToString(g_sq_state)+" "+g_sq_reason, g_sq_state==SQ_ARMED||g_sq_state==SQ_FALSE_BREAK?DB_CLR_RED:(g_sq_state==SQ_BREAKOUT_UP||g_sq_state==SQ_BREAKOUT_DN?DB_CLR_YELLOW:DB_CLR_GRAY), yb);
 
     // Spike SL
     DrawDR("SPKA",row++,"Spike ATRMult",InpUseSpikeSL?DoubleToString(InpSpike_ATR_Mult,1)+"x":"OFF",InpUseSpikeSL?DB_CLR_WHITE:DB_CLR_GRAY,yb);
@@ -4484,7 +3508,7 @@ void OnTick(){
     int rt=Bars(_Symbol,_Period);if(rt<InpSMA_Slow+50)return;
     if(!g_history_done){
         g_history_done=true;g_current_bar=rt;
-        DrawEMARibbon();ScanHistory();
+        DrawEMARibbon();DrawEvasiveSTVisual();ScanHistory();
         if(!InpIndicatorOnly)ReconcilePositionState();
         if(UseLateEntry()&&g_last_signal!=0&&HasActivePosition())CheckLateEntry();
         DrawTPSLLines();DrawDashboard(true);ChartRedraw();return;
@@ -4498,7 +3522,6 @@ void OnTick(){
         // New trading day → reset trailing-DD circuit breaker
     }
     if(!ReadIndicators())return;
-    UpdateMarketRegime();
     if(!InpIndicatorOnly)ReconcilePositionState();
 
     // === TICK LAYER ===
@@ -4537,6 +3560,15 @@ void OnTick(){
             // F0 evaluates against this number, dashboard displays this number.
             g_last_signal_gap_pts=MathAbs(g_ema_fast-g_sma_slow)/_Point;
 
+            // Indicator-only mode has no real server position, so reverse
+            // signals must reset virtual runtime direction to avoid stale
+            // SELL/BUY state sticking on dashboard/TP-SL visuals.
+            if(InpIndicatorOnly && g_last_signal!=0 && sig!=g_last_signal){
+                DrawSignalLabel(sig,st,sp,SC_REVERSAL);
+                ColorSignalCandle(sig,st);
+                ResetRuntimeTradeState(true);
+            }
+
             // Close opposite position using server truth
             int cur_pos_dir=GetActivePositionDir();
             if(cur_pos_dir!=0&&sig!=cur_pos_dir){
@@ -4551,7 +3583,7 @@ void OnTick(){
                 if(!InpIndicatorOnly){
                     if(!EAClose("REVERSE")){
                         Print("[REV] CRITICAL close failed — aborting new entry.");
-                        DrawEMARibbon();g_dashboard_dirty=true;DrawTPSLLines();
+                        DrawEMARibbon();DrawEvasiveSTVisual();g_dashboard_dirty=true;DrawTPSLLines();
                         if(g_dashboard_dirty){DrawDashboard(false);g_dashboard_dirty=false;}
                         return;
                     }
@@ -4577,7 +3609,7 @@ void OnTick(){
                 // Entry/exit branches still use g_pipe_hard/g_pipe_soft (filter
                 // pipeline including regime block), so behavior is unchanged
                 // when regime is OFF or when regime status matches filter.
-                ENUM_SIGNAL_CLASS live_label = g_pipe_hard ? SC_BLOCKED : SC_VALID;
+                ENUM_SIGNAL_CLASS live_label = g_pipe_hard ? SC_BLOCKED : (g_pipe_soft ? SC_SOFT : SC_VALID);
 
                 if(pipe_ok&&!g_pipe_hard){
                     // VALID per filter pipeline. Label may be SOFT if regime is
@@ -4585,7 +3617,7 @@ void OnTick(){
                     // normal TP/SL because regime rules don't dictate TP/SL.
                     g_last_decision="V";
                     DrawSignalLabel(sig,st,sp,live_label);
-                    ColorSignalCandle(sig,st);
+                    if(ShouldShowSignalVisual(live_label)) ColorSignalCandle(sig,st);
                     UpdateVisualForSignal(sig,sp,g_atr_val,false);
                     if(g_last_signal==0){
                         SetupTrade(sig,false);EAOpen(sig);DrawTPSLLines();
@@ -4596,20 +3628,18 @@ void OnTick(){
                     // side triggered the block.
                     g_last_decision="B";
                     DrawSignalLabel(sig,st,sp,live_label);
-                    ColorSignalCandle(sig,st);
+                    if(ShouldShowSignalVisual(live_label)) ColorSignalCandle(sig,st);
                     if(g_last_signal==0){
                         ClearVisualTradeState();
                         DrawTPSLLines();
                         // Identify which filter caused the BLOCK so F3 reason is specific.
                         string breason;
-                        if(g_f0_trig)                                       breason="F0";
-                        else if(InpRegime_Enable && g_regime_block)         breason="REG-"+g_regime_reason;
-                        else if(InpIF_Enable && g_if_block)                 breason="IF-"+g_if_state;
-                        else if(g_f1_trig)                                  breason="F1";
-                        else if(g_f2_trig)                                  breason="F2";
-                        else if(g_f4_trig)                                  breason="F4";
-                        else if(g_f5_trig)                                  breason="F5-"+g_f5_reason;
-                        else                                                breason="FILTER";
+                        if(g_f2_trig) breason="F2";
+                        else if(HTFContextBlocks(sig,1)) breason="HTF";
+                        else if(EvasiveSTBlocks(sig,1)) breason="V_LINE";
+                        else if(SlowMAAngleBlocks(sig,1)) breason="SLOW_ANGLE";
+                        else if(SidewayBlocks(sig,1)) breason="SIDEWAY";
+                        else breason="FILTER";
                         ArmF3Recovery(sig,st,breason);
                         if(UseClassicReentry()){
                             ArmReentry(sig,"BLOCKED");
@@ -4656,7 +3686,7 @@ void OnTick(){
         }
 
         ProcessRetestReentry();
-        DrawEMARibbon();g_dashboard_dirty=true;
+        DrawEMARibbon();DrawEvasiveSTVisual();g_dashboard_dirty=true;
     }
     DrawTPSLLines();
     if(g_dashboard_dirty){DrawDashboard(false);g_dashboard_dirty=false;}
@@ -4665,9 +3695,13 @@ void OnTick(){
 void OnChartEvent(const int id,const long &lparam,const double &dparam,const string &sparam){
     if(id==CHARTEVENT_OBJECT_CLICK&&sparam==ObjName("DASH_BTN")){
         g_dash_visible=!g_dash_visible;
-        ObjectSetString(0,ObjName("DASH_BTN"),OBJPROP_TEXT,"PANEL");
-        ObjectSetInteger(0,ObjName("DASH_BTN"),OBJPROP_BGCOLOR,g_dash_visible?C'40,50,70':C'70,30,30');
-        ObjectSetInteger(0,ObjName("DASH_BTN"),OBJPROP_STATE,false);
-        DrawDashboard(true);ChartRedraw();
+        EnsureDashboardButton();
+        DrawDashboard(true);
+        ChartRedraw();
+    }
+    if(id==CHARTEVENT_CHART_CHANGE){
+        DrawEMARibbon();
+        DrawEvasiveSTVisual();
+        ChartRedraw();
     }
 }
