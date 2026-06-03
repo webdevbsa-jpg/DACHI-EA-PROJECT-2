@@ -2,7 +2,7 @@
 
 Tanggal update terakhir: 2026-06-02
 Branch kerja: `work`
-EA aktif saat ini: `Dachi_Trader_v13_11_36.mq5`
+EA aktif saat ini: `Dachi_Trader_v13_11_37.mq5`
 Dokumen ini menggabungkan handoff baseline (`HANDOFF_DACHI_TRADER_V13_11_7_ID.md`) dengan perjalanan sesi Clean Core / Advanced Modules. **Setiap update berikutnya wajib memperbarui dokumen ini.**
 
 ---
@@ -30,7 +30,7 @@ Sumber: `HANDOFF_DACHI_TRADER_V13_11_7_ID.md`.
 
 ---
 
-## 2. Perjalanan sesi Clean Core sampai v13.11.36
+## 2. Perjalanan sesi Clean Core sampai v13.11.37
 
 ### v13.11.8 — HTF Context + Clean Core awal
 - Menambahkan HTF context gate H1/M15.
@@ -109,9 +109,9 @@ Sumber: `HANDOFF_DACHI_TRADER_V13_11_7_ID.md`.
 
 ### v13.11.30 — Phase A ECI Sideways Filter
 - Menambahkan Phase A `Entropy Cluster Index (ECI)` sebagai anti-chop/sideways filter berbasis Shannon entropy dari struktur candle (body, upper wick, lower wick) dalam rolling window.
-- Input baru: `InpECI_Action`, `InpECI_Lookback`, `InpECI_ChopThreshold`, dan `InpECI_MixedThreshold`. Default `F_SOFT` agar fase awal menjadi limited/diagnostic dulu, bukan hard-block agresif.
+- Input baru: `InpSW_Action`, `InpECI_Lookback`, `InpSW_ChopThreshold`, dan `InpECI_MixedThreshold`. Default `F_SOFT` agar fase awal menjadi limited/diagnostic dulu, bukan hard-block agresif.
 - Implementasi `CalcECIAt()` dan `ECITriggered()` menghitung skor entropy 0..1: `ORDER`, `MIXED`, atau `CHOP`.
-- Pipeline live dan historical sekarang memperlakukan ECI `F_HARD` sebagai block, dan `F_SOFT` sebagai limited/soft. Dashboard menampilkan row `ECI Entropy`.
+- Pipeline live dan historical sekarang memperlakukan ECI `F_HARD` sebagai block, dan `F_SOFT` sebagai limited/soft. Dashboard menampilkan row `SW / Sideway Clustering`.
 - Logic marker dibump ke `0x13C00300`.
 
 
@@ -124,13 +124,13 @@ Sumber: `HANDOFF_DACHI_TRADER_V13_11_7_ID.md`.
 ### v13.11.32 — ECI calibration: reduce over-filtering
 - Menurunkan agresivitas ECI karena threshold entropy murni membuat hampir semua sinyal menjadi `LIMITED/BLOCKED` pada XAUUSD M1/M5.
 - `CHOP` sekarang tidak hanya membutuhkan entropy tinggi, tetapi juga harus directionless dan body lemah: `InpECI_DirectionalBalanceMax` + `InpECI_BodyDominanceMax`.
-- Default ECI dibuat lebih longgar: `InpECI_ChopThreshold=0.82`, `InpECI_MixedThreshold=0.62`.
+- Default ECI dibuat lebih longgar: `InpSW_ChopThreshold=0.82`, `InpECI_MixedThreshold=0.62`.
 - Dashboard dapat menampilkan `TREND` ketika entropy tinggi tetapi struktur candle masih punya directional bias/body dominance, sehingga sinyal tidak otomatis limited.
 - Logic marker dibump ke `0x13C00320`.
 
 
 ### v13.11.33 — ECI v2 visibility + remove-cleanup hardening
-- Memperjelas UI bahwa ECI yang aktif adalah `ECI v2` lewat input group dan dashboard row `ECI v2 Entropy`.
+- Memperjelas UI bahwa ECI yang aktif adalah `ECI v2` lewat input group dan dashboard row `SW / Sideway Clustering`.
 - Memperkuat cleanup object EA: `CleanupAllEAObjects()` sekarang mencari current/legacy prefix `DT13_` dan `DT13`, melakukan multi-pass cleanup sampai tidak ada object EA tersisa, dan mengembalikan jumlah object yang dihapus untuk log deinit.
 - `OnDeinit()` sekarang menjalankan cleanup pada semua reason (remove, chart close, parameter change, template/timeframe reload), lalu cleanup ulang setelah indicator handle release dan `ChartRedraw()`. Ini mencegah object stale tertinggal ketika user remove/reload EA.
 - Logic marker dibump ke `0x13C00330`.
@@ -151,24 +151,31 @@ Sumber: `HANDOFF_DACHI_TRADER_V13_11_7_ID.md`.
 - Logic marker dibump ke `0x13C00350`.
 
 ### v13.11.36 — BRE reason toggles + ADX strength guard
-- Menambahkan toggle per alasan block agar `Blocked Retest Re-entry` hanya bekerja untuk filter yang dipilih: F2, HTF, V-Line, SlowMA Angle, ECI, Sideway, ATR Health, Squeeze, dan fallback Other.
+- Menambahkan toggle per alasan block agar `Blocked Retest Re-entry` hanya bekerja untuk filter yang dipilih: F2, HTF, V-Line, SlowMA Angle, SW, Sideway, ATR Health, Squeeze, dan fallback Other.
 - Menambahkan `InpBRE_MinADX`, `InpBRE_RequireADXRising`, dan `InpBRE_ADXRiseBars` agar re-entry hanya valid saat ADX cukup kuat dan, secara default, sedang naik. Ini ditujukan untuk mengurangi re-entry whipsaw pada area sideway.
-- Default re-entry untuk block `ECI`, `SIDEWAY`, `ATR_HEALTH`, `SQUEEZE`, dan `FILTER/OTHER` dibuat OFF agar sideway/chop tidak otomatis di-entry ulang.
+- Default re-entry untuk block `SW`, `SIDEWAY`, `ATR_HEALTH`, `SQUEEZE`, dan `FILTER/OTHER` dibuat OFF agar sideway/chop tidak otomatis di-entry ulang.
 - `ScanHistory()` memakai alasan block historis yang sama sehingga label `RE-ENTRY BUY/SELL` hanya muncul jika alasan block tersebut memang diizinkan.
 - Logic marker dibump ke `0x13C00360`.
+
+### v13.11.37 — SW naming + re-entry TP/SL visual context
+- Mengubah nama user-facing `ECI v2 Entropy` menjadi `SW / Sideway Clustering`, termasuk input group, dashboard row, helper, dan block reason `SW`.
+- Menambahkan dashboard row `Block Reason` agar penyebab block terakhir terlihat langsung; ini menjawab kasus audit ketika sinyal terakhir `BLOCKED` tetapi dashboard lama hanya menampilkan total `1H` tanpa reason.
+- Dashboard no-position sekarang memakai arah MA saat ini sebagai arah evaluasi, bukan default BUY, sehingga `Filters 1H` lebih sesuai dengan kondisi chart.
+- Historical BRE sekarang mempertahankan visual ENTRY/SL/TP untuk re-entry terakhir yang valid, sehingga kasus re-entry tetap punya konteks risk/reward seperti signal valid.
+- Logic marker dibump ke `0x13C00370`.
 
 ---
 
 ## 3. Status EA aktif saat ini
 
-File aktif: `Dachi_Trader_v13_11_36.mq5`
+File aktif: `Dachi_Trader_v13_11_37.mq5`
 
 Identifier yang harus sinkron:
-- Header file: `Dachi_Trader_v13_11_36.mq5`
-- Version: `13.11.36`
-- License payload: `"ea_version":"13.11.36"`
-- Init/deinit log: `v13.11.36`
-- Logic marker: `0x13C00360`
+- Header file: `Dachi_Trader_v13_11_37.mq5`
+- Version: `13.11.37`
+- License payload: `"ea_version":"13.11.37"`
+- Init/deinit log: `v13.11.37`
+- Logic marker: `0x13C00370`
 
 ---
 
@@ -204,7 +211,7 @@ Identifier yang harus sinkron:
 
 Karena environment Codex tidak memiliki compiler MQL5, test runtime wajib di MetaEditor/MT5:
 
-1. Compile `Dachi_Trader_v13_11_36.mq5`.
+1. Compile `Dachi_Trader_v13_11_37.mq5`.
 2. Attach ke XAUUSD M5.
 3. Test Blocked Retest Re-entry:
    - Buat kondisi sinyal hard-blocked, lalu tunggu pullback/retest ke MA band.
@@ -222,10 +229,10 @@ Karena environment Codex tidak memiliki compiler MQL5, test runtime wajib di Met
 6. Test stale BLOCKED repaint:
    - Matikan filter/gate, reload EA, lalu pastikan label lama `! BLOCKED` berubah menjadi BUY/SELL/LIMITED sesuai evaluasi terbaru.
    - Jika `InpShowBlockedSignals=false`, object `SIG_B_*/SIG_S_*` blocked lama harus hilang.
-7. Test ECI Phase A:
-   - `InpECI_Action=F_SOFT` harus menampilkan `LIMITED` saat `ECI Entropy` masuk `CHOP`, tanpa hard-block.
-   - `InpECI_Action=F_HARD` harus memblok sinyal saat skor ECI >= `InpECI_ChopThreshold`.
-   - Dashboard row `ECI v2 Entropy` harus berubah antara `ORDER`, `MIXED`, `TREND`, dan `CHOP`.
+7. Test SW / Sideway Clustering:
+   - `InpSW_Action=F_SOFT` harus menampilkan `LIMITED` saat `SW / Sideway Clustering` masuk `CHOP`, tanpa hard-block.
+   - `InpSW_Action=F_HARD` harus memblok sinyal saat skor SW >= `InpSW_ChopThreshold`.
+   - Dashboard row `SW / Sideway Clustering` harus berubah antara `ORDER`, `MIXED`, `TREND`, dan `CHOP`.
 8. Test V-Line:
    - `InpVLine_TF=PERIOD_CURRENT` untuk match chart M5.
    - Band tidak flicker saat scroll/chart update.
@@ -243,5 +250,5 @@ Karena environment Codex tidak memiliki compiler MQL5, test runtime wajib di Met
 - Jangan klaim compile/backtest sukses jika tidak benar-benar dijalankan di MT5/MetaEditor.
 - Jika ada fitur visual baru, sediakan toggle jika fitur itu berpotensi membuat chart terlalu ramai.
 - Jika filter baru memblok sinyal, tampilkan state/reason di dashboard agar user bisa audit.
-- Untuk ECI, kalibrasi threshold di XAUUSD M5 dulu dengan default `F_SOFT`; gunakan `F_HARD` hanya setelah skor CHOP terbukti akurat. Untuk v13.11.32, CHOP harus memenuhi entropy tinggi + directional balance rendah + body dominance rendah.
+- Untuk SW / Sideway Clustering, kalibrasi threshold di XAUUSD M5 dulu dengan default `F_SOFT`; gunakan `F_HARD` hanya setelah skor CHOP terbukti akurat. Untuk v13.11.32, CHOP harus memenuhi entropy tinggi + directional balance rendah + body dominance rendah.
 - Saat analisis V-Line lag, jangan langsung mengganti logic utama; pertimbangkan mode opsional early-flip agar karakter noise-avoidance tetap bisa dipertahankan.
