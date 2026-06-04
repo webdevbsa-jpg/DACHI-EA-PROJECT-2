@@ -2,7 +2,7 @@
 
 Tanggal update terakhir: 2026-06-04
 Branch kerja: `work`
-EA aktif saat ini: `Dachi_Trader_v13_11_39.mq5`
+EA aktif saat ini: `Dachi_Trader_v13_11_40.mq5`
 Dokumen ini menggabungkan handoff baseline (`HANDOFF_DACHI_TRADER_V13_11_7_ID.md`) dengan perjalanan sesi Clean Core / Advanced Modules. **Setiap update berikutnya wajib memperbarui dokumen ini.**
 
 ---
@@ -30,7 +30,7 @@ Sumber: `HANDOFF_DACHI_TRADER_V13_11_7_ID.md`.
 
 ---
 
-## 2. Perjalanan sesi Clean Core sampai v13.11.39
+## 2. Perjalanan sesi Clean Core sampai v13.11.40
 
 ### v13.11.8 — HTF Context + Clean Core awal
 - Menambahkan HTF context gate H1/M15.
@@ -185,18 +185,24 @@ Sumber: `HANDOFF_DACHI_TRADER_V13_11_7_ID.md`.
 - Input baru `InpUseAutoJournal`, `InpJournalOnlyTester`, `InpJournalSignals`, dan `InpJournalUseCommonFolder` mengatur export jurnal ke `MQL5/Files/Dachi_Trader_Logs/`.
 - Input baru `InpBRE_EnterAsLimited` menentukan perlakuan BRE: `true` = RE-ENTRY memakai mode LIMITED/tight TP-SL, `false` = RE-ENTRY diperlakukan seperti VALID/normal TP-SL. Live BRE dan visual historical BRE mengikuti opsi ini.
 
+### v13.11.40 — Compile fix untuk Auto Journal
+- Membump file aktif ke `Dachi_Trader_v13_11_40.mq5` dan logic marker ke `0x13C00400`.
+- Memperbaiki error compile pada journal: pemanggilan `CalcSWAt()` sekarang memakai parameter state ketiga sesuai signature.
+- Memperbaiki warning/konflik compile: return hash `uint` dicast ke `int`, dan local variable ATR-block di pipeline diganti dari `h_atr` menjadi `h_atr_block` agar tidak bentrok dengan handle global `h_atr`.
+- Tidak mengubah behavior trading/journal selain perbaikan compile.
+
 ---
 
 ## 3. Status EA aktif saat ini
 
-File aktif: `Dachi_Trader_v13_11_39.mq5`
+File aktif: `Dachi_Trader_v13_11_40.mq5`
 
 Identifier yang harus sinkron:
-- Header file: `Dachi_Trader_v13_11_39.mq5`
-- Version: `13.11.39`
-- License payload: `"ea_version":"13.11.39"`
-- Init/deinit log: `v13.11.39`
-- Logic marker: `0x13C00390`
+- Header file: `Dachi_Trader_v13_11_40.mq5`
+- Version: `13.11.40`
+- License payload: `"ea_version":"13.11.40"`
+- Init/deinit log: `v13.11.40`
+- Logic marker: `0x13C00400`
 
 ---
 
@@ -233,7 +239,7 @@ Identifier yang harus sinkron:
 
 Karena environment Codex tidak memiliki compiler MQL5, test runtime wajib di MetaEditor/MT5:
 
-1. Compile `Dachi_Trader_v13_11_39.mq5`.
+1. Compile `Dachi_Trader_v13_11_40.mq5`.
 2. Attach ke XAUUSD M5.
 3. Test Blocked Retest Re-entry:
    - Buat kondisi sinyal hard-blocked, lalu tunggu pullback/retest ke MA band.
