@@ -2,7 +2,7 @@
 
 Tanggal update terakhir: 2026-06-04
 Branch kerja: `work`
-EA aktif saat ini: `Dachi_Trader_v13_11_38.mq5`
+EA aktif saat ini: `Dachi_Trader_v13_11_39.mq5`
 Dokumen ini menggabungkan handoff baseline (`HANDOFF_DACHI_TRADER_V13_11_7_ID.md`) dengan perjalanan sesi Clean Core / Advanced Modules. **Setiap update berikutnya wajib memperbarui dokumen ini.**
 
 ---
@@ -30,7 +30,7 @@ Sumber: `HANDOFF_DACHI_TRADER_V13_11_7_ID.md`.
 
 ---
 
-## 2. Perjalanan sesi Clean Core sampai v13.11.38
+## 2. Perjalanan sesi Clean Core sampai v13.11.39
 
 ### v13.11.8 — HTF Context + Clean Core awal
 - Menambahkan HTF context gate H1/M15.
@@ -177,18 +177,26 @@ Sumber: `HANDOFF_DACHI_TRADER_V13_11_7_ID.md`.
 - Catatan: user menyebut dua pembaruan sebelumnya sempat tetap berada di v13.11.37; rilis ini menjadi koreksi versioning/handoff resmi.
 - Logic marker dibump ke `0x13C00380`.
 
+### v13.11.39 — Backtest Auto Journal + BRE limited/valid mode
+- Membump file aktif ke `Dachi_Trader_v13_11_39.mq5` dan logic marker ke `0x13C00390`.
+- Menambahkan **Backtest Auto Journal** berbasis CSV untuk mencatat semua signal yang muncul, termasuk `VALID`, `LIMITED`, `RE-ENTRY`, `F3_RECOVERY`, dan `BLOCKED` yang tidak menjadi entry.
+- CSV journal mencatat `signal_entry_price` pada harga signal muncul dan menutup row sebelumnya dengan `signal_exit_price` ketika signal berikutnya muncul. Dengan demikian exit-price satu signal sama dengan entry-price signal berikutnya; journal juga mencatat `signal_duration_bars`, `signal_result`, dan `signal_exit_reason`.
+- Snapshot indicator yang dicatat mencakup ATR, spread, EMA fast, slow MA, MA gap, SlowMA angle, V-Line state/direction, SW state/score, ADX, DI+, DI-, SL, dan TP1–TP5.
+- Input baru `InpUseAutoJournal`, `InpJournalOnlyTester`, `InpJournalSignals`, dan `InpJournalUseCommonFolder` mengatur export jurnal ke `MQL5/Files/Dachi_Trader_Logs/`.
+- Input baru `InpBRE_EnterAsLimited` menentukan perlakuan BRE: `true` = RE-ENTRY memakai mode LIMITED/tight TP-SL, `false` = RE-ENTRY diperlakukan seperti VALID/normal TP-SL. Live BRE dan visual historical BRE mengikuti opsi ini.
+
 ---
 
 ## 3. Status EA aktif saat ini
 
-File aktif: `Dachi_Trader_v13_11_38.mq5`
+File aktif: `Dachi_Trader_v13_11_39.mq5`
 
 Identifier yang harus sinkron:
-- Header file: `Dachi_Trader_v13_11_38.mq5`
-- Version: `13.11.38`
-- License payload: `"ea_version":"13.11.38"`
-- Init/deinit log: `v13.11.38`
-- Logic marker: `0x13C00380`
+- Header file: `Dachi_Trader_v13_11_39.mq5`
+- Version: `13.11.39`
+- License payload: `"ea_version":"13.11.39"`
+- Init/deinit log: `v13.11.39`
+- Logic marker: `0x13C00390`
 
 ---
 
@@ -225,7 +233,7 @@ Identifier yang harus sinkron:
 
 Karena environment Codex tidak memiliki compiler MQL5, test runtime wajib di MetaEditor/MT5:
 
-1. Compile `Dachi_Trader_v13_11_38.mq5`.
+1. Compile `Dachi_Trader_v13_11_39.mq5`.
 2. Attach ke XAUUSD M5.
 3. Test Blocked Retest Re-entry:
    - Buat kondisi sinyal hard-blocked, lalu tunggu pullback/retest ke MA band.
@@ -255,6 +263,13 @@ Karena environment Codex tidak memiliki compiler MQL5, test runtime wajib di Met
    - Threshold `0`, `3`, `5` derajat.
    - BUY harus butuh angle positif sesuai threshold.
    - SELL harus butuh angle negatif sesuai threshold.
+
+10. Test Backtest Auto Journal:
+   - Jalankan Strategy Tester dengan `InpUseAutoJournal=true`.
+   - Pastikan file `Dachi_Trader_Logs/Dachi_Signal_Journal_<symbol>_<tf>_<date>.csv` terbentuk di `MQL5/Files` atau `Common/Files` jika `InpJournalUseCommonFolder=true`.
+   - Pastikan row `BLOCKED` tetap tercatat walaupun tidak ada trade/deal.
+   - Pastikan `signal_exit_price` satu row sama dengan `signal_entry_price` row signal berikutnya, dan row terakhir tertulis `OPEN` saat EA deinit/backtest selesai.
+   - Uji `InpBRE_EnterAsLimited=true/false` untuk memastikan RE-ENTRY memakai TP/SL tight atau normal sesuai opsi.
 
 ---
 
