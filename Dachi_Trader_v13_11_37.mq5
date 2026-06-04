@@ -289,7 +289,10 @@ input bool   InpBRE_AllowF2Blocks         = true;   // allow re-entry if origina
 input bool   InpBRE_AllowHTFBlocks        = true;   // allow re-entry if original block reason was HTF
 input bool   InpBRE_AllowVLineBlocks      = true;   // allow re-entry if original block reason was V-Line
 input bool   InpBRE_AllowSlowAngleBlocks  = true;   // allow re-entry if original block reason was SlowMA Angle
-input bool   InpBRE_AllowSWBlocks        = false;  // default false: SW/CHOP blocks are sideway-risky
+input bool   InpBRE_AllowSWBlocks         = false;  // default false: SW/CHOP blocks are sideway-risky
+input double InpBRE_SW_MinADX             = 24.0;   // stricter ADX floor when SW/CHOP is explicitly allowed
+input bool   InpBRE_SW_RequireSlowAngle   = true;   // SW BRE needs SlowMA angle aligned with re-entry direction
+input bool   InpBRE_SW_RequireVLineAlign  = true;   // SW BRE needs V-Line bias aligned with re-entry direction
 input bool   InpBRE_AllowSidewayBlocks    = false;  // default false: do not re-enter explicit sideway blocks
 input bool   InpBRE_AllowATRHealthBlocks  = false;  // default false: do not re-enter abnormal ATR blocks
 input bool   InpBRE_AllowSqueezeBlocks    = false;  // default false: avoid squeeze/chop whipsaw re-entry
@@ -1374,6 +1377,9 @@ uint ComputeFilterHash(){
     h = (h ^ (uint)(InpBRE_AllowVLineBlocks?1:0)) * 16777619;
     h = (h ^ (uint)(InpBRE_AllowSlowAngleBlocks?1:0)) * 16777619;
     h = (h ^ (uint)(InpBRE_AllowSWBlocks?1:0)) * 16777619;
+    h = (h ^ (uint)(int)(InpBRE_SW_MinADX*100)) * 16777619;
+    h = (h ^ (uint)(InpBRE_SW_RequireSlowAngle?1:0)) * 16777619;
+    h = (h ^ (uint)(InpBRE_SW_RequireVLineAlign?1:0)) * 16777619;
     h = (h ^ (uint)(InpBRE_AllowSidewayBlocks?1:0)) * 16777619;
     h = (h ^ (uint)(InpBRE_AllowATRHealthBlocks?1:0)) * 16777619;
     h = (h ^ (uint)(InpBRE_AllowSqueezeBlocks?1:0)) * 16777619;
@@ -2801,11 +2807,11 @@ void CheckAdaptiveReversal(bool tick_level){
 
 // === RE-ENTRY ===
 bool IsBREAllowedBlockReason(string reason){
+    if(reason=="SW") return InpBRE_AllowSWBlocks; // SW is handled as a special high-risk BRE class, not as normal recovery.
     if(reason=="F2") return InpBRE_AllowF2Blocks;
     if(reason=="HTF") return InpBRE_AllowHTFBlocks;
     if(reason=="V_LINE") return InpBRE_AllowVLineBlocks;
     if(reason=="SLOW_ANGLE") return InpBRE_AllowSlowAngleBlocks;
-    if(reason=="SW") return InpBRE_AllowSWBlocks;
     if(reason=="SIDEWAY") return InpBRE_AllowSidewayBlocks;
     if(reason=="ATR_HEALTH") return InpBRE_AllowATRHealthBlocks;
     if(reason=="SQUEEZE") return InpBRE_AllowSqueezeBlocks;
@@ -2824,18 +2830,49 @@ string GetBlockReasonAt(int sig, int idx){
     return "FILTER";
 }
 
-bool BREDIOk(int dir, int idx){
+bool BREVLineAlignOk(int dir, int idx){
+    if(!InpUseVLineGuard) return false;
+    ENUM_TIMEFRAMES tf=(InpVLine_TF==PERIOD_CURRENT?_Period:InpVLine_TF);
+    int tf_shift=idx;
+    if(tf!=_Period){
+        datetime t=iTime(_Symbol,_Period,idx);
+        tf_shift=iBarShift(_Symbol,tf,t,false);
+        if(tf_shift<0) return false;
+    }
+    double band=0.0; int vdir=0; bool noisy=false, changed=false;
+    if(!CalcEvasiveSupertrendAt(tf,tf_shift,band,vdir,noisy,changed)) return false;
+    return (vdir==dir);
+}
+
+bool BRESlowAngleOk(int dir, int idx){
+    if(!InpUseSlowMAAngleGuard) return false;
+    double angle=0.0;
+    if(!CalcSlowMAVisualAngleAt(idx,angle)) return false;
+    double th=MathMax(0.0,InpSlowMA_MinAngleDeg);
+    return (dir>0 ? (angle>=th) : (angle<=-th));
+}
+
+bool BRESWContextOk(int dir, int idx){
+    if(InpBRE_SW_RequireSlowAngle && !BRESlowAngleOk(dir,idx)) return false;
+    if(InpBRE_SW_RequireVLineAlign && !BREVLineAlignOk(dir,idx)) return false;
+    return true;
+}
+
+bool BREDIOk(int dir, int idx, string reason=""){
     if(h_adx==INVALID_HANDLE) return false;
+    bool is_sw=(reason=="SW");
     double adx[1], dp[1], dm[1];
     if(CopyBuffer(h_adx,0,idx,1,adx)<=0 || CopyBuffer(h_adx,1,idx,1,dp)<=0 || CopyBuffer(h_adx,2,idx,1,dm)<=0) return false;
-    if(adx[0] < InpBRE_MinADX) return false;
-    if(InpBRE_RequireADXRising){
+    double min_adx=is_sw ? MathMax(InpBRE_MinADX,InpBRE_SW_MinADX) : InpBRE_MinADX;
+    if(adx[0] < min_adx) return false;
+    if(InpBRE_RequireADXRising || is_sw){
         int back=MathMax(1,InpBRE_ADXRiseBars);
         double old_adx[1];
         if(CopyBuffer(h_adx,0,idx+back,1,old_adx)<=0) return false;
         if(adx[0] <= old_adx[0]) return false;
     }
-    if(!InpBRE_RequireDIDirection) return true;
+    if(is_sw && !BRESWContextOk(dir,idx)) return false;
+    if(!InpBRE_RequireDIDirection && !is_sw) return true;
     if(dir==1) return (dp[0] > dm[0] + InpBRE_DIMargin);
     return (dm[0] > dp[0] + InpBRE_DIMargin);
 }
@@ -2899,7 +2936,7 @@ void ProcessBlockedRetestReentry(){
 
     bool close_back=(g_bre_dir==1 ? c>top : c<bot);
     bool signal_candle_ok=!InpBRE_RequireSignalCandle || (g_bre_dir==1 ? c>o : c<o);
-    bool di_ok=BREDIOk(g_bre_dir,idx);
+    bool di_ok=BREDIOk(g_bre_dir,idx,g_bre_reason);
     if(InpBRE_RequireMAAlign && !ma_aligned) return;
     if(!close_back || !signal_candle_ok || !di_ok) return;
     if(!PreCheckMarketConditions()) return;
@@ -2934,7 +2971,7 @@ bool FindBlockedRetestReentryAt(int block_idx, int dir, string reason, datetime 
 
         bool close_back=(dir==1 ? c>top : c<bot);
         bool signal_candle_ok=!InpBRE_RequireSignalCandle || (dir==1 ? c>o : c<o);
-        bool di_ok=BREDIOk(dir,b);
+        bool di_ok=BREDIOk(dir,b,reason);
         if(InpBRE_RequireMAAlign && !ma_aligned) continue;
         if(!close_back || !signal_candle_ok || !di_ok) continue;
 
