@@ -1,10 +1,10 @@
 // Dachi_Trader_v13_11_37.mq5 — Expert Advisor
-// Version: 13.11.37
+// Version: 13.11.38
 // Clean Core branch: simplified runtime pipeline (F2 + HTF gate).
 
 #property copyright   "Daniel @danieljulyanto"
-#property version     "13.11.37"
-#property description "Dachi Trader v13.11.37 — Expert Advisor"
+#property version     "13.11.38"
+#property description "Dachi Trader v13.11.38 — Expert Advisor"
 
 #define MAX_TP            30
 #define VOL_AVG_PERIOD    20
@@ -75,6 +75,11 @@ input double             InpSW_ChopThreshold  = 0.82;   // high entropy needed b
 input double             InpSW_MixedThreshold = 0.62;   // dashboard MIXED/ORDERED boundary
 input double             InpSW_DirectionalBalanceMax = 0.22; // CHOP only if bull/bear balance is this low
 input double             InpSW_BodyDominanceMax      = 0.38; // CHOP only if strong body share is this low
+input bool               InpSW_UseTrendOverride = true;       // let strong trend evidence bypass CHOP SW block
+input double             InpSW_OverrideMinSlowAngleDeg = 6.0; // BUY >= +deg, SELL <= -deg to override CHOP
+input double             InpSW_OverrideMinADX = 20.0;         // ADX floor for override; <=0 disables ADX floor
+input bool               InpSW_OverrideRequireDIDirection = true; // BUY needs DI+>DI-, SELL needs DI->DI+
+input bool               InpSW_OverrideRequireMARibbonDirection = true; // BUY fast>slow, SELL fast<slow
 
 input group "=== Clean Core HTF Context (H1 Bias + M15 Setup) ==="
 input bool   InpUseH1Bias         = true;
@@ -686,7 +691,7 @@ bool LIC_VerifyOnce(){
     }
     string url = InpLicense_URL + "/backend/api/license/verify.php";
     long account = AccountInfoInteger(ACCOUNT_LOGIN);
-    string body = StringFormat("{\"account_number\":\"%I64u\",\"ea_version\":\"13.11.37\"}", (ulong)account);
+    string body = StringFormat("{\"account_number\":\"%I64u\",\"ea_version\":\"13.11.38\"}", (ulong)account);
     char post[]; StringToCharArray(body, post, 0, StringLen(body));
     char result[]; string headers="Content-Type: application/json\r\n"; string resp_headers;
     int timeout = 5000;
@@ -1171,8 +1176,9 @@ int OnInit(){
     h_atr=iATR(_Symbol,_Period,InpATR_Period);
     if(h_ema_fast==INVALID_HANDLE||h_sma_slow==INVALID_HANDLE||h_atr==INVALID_HANDLE){Print("[ERROR] Core handle fail");return INIT_FAILED;}
 
-    // ADX handle — shared by F1 (DI±) and Market Regime detector.
-    if(InpF1_Action!=F_OFF || InpRegime_Enable){
+    // ADX handle — shared by F1 (DI±), Market Regime detector, and SW trend override.
+    bool sw_override_needs_adx = (InpSW_Action!=F_OFF && InpSW_UseTrendOverride && (InpSW_OverrideMinADX>0.0 || InpSW_OverrideRequireDIDirection));
+    if(InpF1_Action!=F_OFF || InpRegime_Enable || sw_override_needs_adx){
         h_adx=iADX(_Symbol,_Period,14);
         if(h_adx==INVALID_HANDLE){Print("[ERROR] ADX handle fail");return INIT_FAILED;}
     }
@@ -1222,7 +1228,7 @@ int OnInit(){
     ChartSetInteger(0,CHART_SHOW_GRID,false);ChartSetInteger(0,CHART_MODE,CHART_CANDLES);
 
     Print("==============================================================");
-    Print("[INIT] Dachi Trader v13.11.37 | ",_Symbol," ",EnumToString(_Period),
+    Print("[INIT] Dachi Trader v13.11.38 | ",_Symbol," ",EnumToString(_Period),
           " | Mode=",(InpIndicatorOnly?"INDICATOR":"EA ACTIVE"));
     string slmm=(InpSlowMA_Method==MODE_EMA?"EMA":InpSlowMA_Method==MODE_SMMA?"SMMA":InpSlowMA_Method==MODE_LWMA?"LWMA":"SMA");
     Print("[INIT] Core: EMA",InpEMA_Fast,"/",slmm,InpSMA_Slow," | ATR",InpATR_Period);
@@ -1260,7 +1266,7 @@ int OnInit(){
 void OnDeinit(const int reason){
     EventKillTimer();
     int deleted=CleanupAllEAObjects();
-    Print("[DEINIT] Dachi v13.11.37 removed reason=",reason," cleanup_deleted=",deleted);
+    Print("[DEINIT] Dachi v13.11.38 removed reason=",reason," cleanup_deleted=",deleted);
     if(h_ema_fast!=INVALID_HANDLE)IndicatorRelease(h_ema_fast);
     if(h_sma_slow!=INVALID_HANDLE)IndicatorRelease(h_sma_slow);
     if(h_atr!=INVALID_HANDLE)IndicatorRelease(h_atr);
@@ -1359,6 +1365,11 @@ uint ComputeFilterHash(){
     h = (h ^ (uint)(int)(InpSW_MixedThreshold*100)) * 16777619;
     h = (h ^ (uint)(int)(InpSW_DirectionalBalanceMax*100)) * 16777619;
     h = (h ^ (uint)(int)(InpSW_BodyDominanceMax*100)) * 16777619;
+    h = (h ^ (uint)(InpSW_UseTrendOverride?1:0)) * 16777619;
+    h = (h ^ (uint)(int)(InpSW_OverrideMinSlowAngleDeg*100)) * 16777619;
+    h = (h ^ (uint)(int)(InpSW_OverrideMinADX*100)) * 16777619;
+    h = (h ^ (uint)(InpSW_OverrideRequireDIDirection?1:0)) * 16777619;
+    h = (h ^ (uint)(InpSW_OverrideRequireMARibbonDirection?1:0)) * 16777619;
     h = (h ^ (uint)(InpUseBlockedRetestReentry?1:0)) * 16777619;
     h = (h ^ (uint)InpBRE_Bars) * 16777619;
     h = (h ^ (uint)(int)(InpBRE_RetestBufferATR*100)) * 16777619;
@@ -1424,7 +1435,7 @@ uint ComputeFilterHash(){
     h = (h ^ (uint)(int)(InpSQ_SellCloseLocMax*100)) * 16777619;
     h = (h ^ (uint)(int)(InpSQ_SpikeRatioBlock*100)) * 16777619;
 
-    h = (h ^ (uint)0x13C00370)             * 16777619;   // logic version marker
+    h = (h ^ (uint)0x13C00380)             * 16777619;   // logic version marker
     return h;
 }
 
@@ -2047,7 +2058,44 @@ bool CalcSWAt(int idx, double &score, string &state){
     return true;
 }
 
-bool SWTriggered(int idx){
+bool SWTrendOverrideValid(int sig, int idx, int &score){
+    score=0;
+    if(!InpSW_UseTrendOverride || sig==0) return false;
+
+    double angle=0.0;
+    if(!CalcSlowMAVisualAngleAt(idx,angle)) return false;
+    double angle_th=MathMax(0.0,InpSW_OverrideMinSlowAngleDeg);
+    bool angle_ok=(sig>0 ? (angle>=angle_th) : (angle<=-angle_th));
+    if(!angle_ok) return false;
+    score++;
+
+    if(InpSW_OverrideRequireMARibbonDirection){
+        double fast=0.0, slow=0.0;
+        if(!ReadCoreMA(idx,fast,slow)) return false;
+        bool ribbon_ok=(sig>0 ? (fast>slow) : (fast<slow));
+        if(!ribbon_ok) return false;
+        score++;
+    }
+
+    if(InpSW_OverrideMinADX>0.0 || InpSW_OverrideRequireDIDirection){
+        if(h_adx==INVALID_HANDLE) return false;
+        double adx[1], dp[1], dm[1];
+        if(CopyBuffer(h_adx,0,idx,1,adx)<=0 || CopyBuffer(h_adx,1,idx,1,dp)<=0 || CopyBuffer(h_adx,2,idx,1,dm)<=0) return false;
+        if(InpSW_OverrideMinADX>0.0){
+            if(adx[0] < InpSW_OverrideMinADX) return false;
+            score++;
+        }
+        if(InpSW_OverrideRequireDIDirection){
+            bool di_ok=(sig>0 ? (dp[0]>dm[0]) : (dm[0]>dp[0]));
+            if(!di_ok) return false;
+            score++;
+        }
+    }
+
+    return true;
+}
+
+bool SWTriggered(int idx, int sig=0){
     g_sw_score=0.0;
     g_sw_direction_balance=0.0;
     g_sw_body_dominance=0.0;
@@ -2056,6 +2104,13 @@ bool SWTriggered(int idx){
     if(InpSW_Action==F_OFF) return false;
     if(!CalcSWAt(idx,g_sw_score,g_sw_state)) return false;
     g_sw_trig=(StringFind(g_sw_state,"CHOP") == 0);
+    if(g_sw_trig){
+        int ovr_score=0;
+        if(SWTrendOverrideValid(sig,idx,ovr_score)){
+            g_sw_state="TREND_OVR "+IntegerToString(ovr_score)+" "+DoubleToString(g_sw_score,2);
+            g_sw_trig=false;
+        }
+    }
     return g_sw_trig;
 }
 
@@ -2248,7 +2303,7 @@ bool EvaluatePipeline(int sig){
     bool h_htf = HTFContextBlocks(sig, 1);
     bool h_est = EvasiveSTBlocks(sig, 1);
     bool h_slow_angle = SlowMAAngleBlocks(sig, 1);
-    bool t_sw = SWTriggered(1);
+    bool t_sw = SWTriggered(1, sig);
     bool h_sw = (InpSW_Action==F_HARD && t_sw);
     bool s_sw = (InpSW_Action==F_SOFT && t_sw);
     bool h_sideway = SidewayBlocks(sig, 1);
@@ -2274,7 +2329,7 @@ bool EvaluatePipelineAt(int idx, int sig, bool &out_hard, bool &out_soft){
     if(HTFContextBlocks(sig, idx)) out_hard=true;
     if(EvasiveSTBlocks(sig, idx)) out_hard=true;
     if(SlowMAAngleBlocks(sig, idx)) out_hard=true;
-    bool t_sw=SWTriggered(idx);
+    bool t_sw=SWTriggered(idx, sig);
     if(t_sw && InpSW_Action==F_HARD) out_hard=true;
     if(t_sw && InpSW_Action==F_SOFT) out_soft=true;
     if(SidewayBlocks(sig, idx)) out_hard=true;
@@ -2817,7 +2872,7 @@ string GetBlockReasonAt(int sig, int idx){
     if(HTFContextBlocks(sig,idx)) return "HTF";
     if(EvasiveSTBlocks(sig,idx)) return "V_LINE";
     if(SlowMAAngleBlocks(sig,idx)) return "SLOW_ANGLE";
-    if(SWTriggered(idx) && InpSW_Action==F_HARD) return "SW";
+    if(SWTriggered(idx,sig) && InpSW_Action==F_HARD) return "SW";
     if(SidewayBlocks(sig,idx)) return "SIDEWAY";
     string atr_state=""; if(EvalATRHealthAt(idx,atr_state)==DEC_BLOCKED) return "ATR_HEALTH";
     string sq_state="", sq_reason=""; if(EvalSqueezeGuard(sig,idx,sq_state,sq_reason)==DEC_BLOCKED) return "SQUEEZE";
@@ -3743,7 +3798,7 @@ void DrawDashboard(bool force){
     bool htf_block = HTFContextBlocks(dash_sig, 1);
     bool est_block = EvasiveSTBlocks(dash_sig,1);
     bool slow_angle_block = SlowMAAngleBlocks(dash_sig,1);
-    bool sw_trig = SWTriggered(1);
+    bool sw_trig = SWTriggered(1,dash_sig);
     bool sw_block = (InpSW_Action==F_HARD && sw_trig);
     bool side_block = SidewayBlocks(dash_sig,1);
     string atr_state=""; ENUM_FILTER_DECISION atr_dec=EvalATRHealthAt(1,atr_state);

@@ -30,7 +30,7 @@ Sumber: `HANDOFF_DACHI_TRADER_V13_11_7_ID.md`.
 
 ---
 
-## 2. Perjalanan sesi Clean Core sampai v13.11.37
+## 2. Perjalanan sesi Clean Core sampai v13.11.38
 
 ### v13.11.8 — HTF Context + Clean Core awal
 - Menambahkan HTF context gate H1/M15.
@@ -164,6 +164,12 @@ Sumber: `HANDOFF_DACHI_TRADER_V13_11_7_ID.md`.
 - Historical BRE sekarang mempertahankan visual ENTRY/SL/TP untuk re-entry terakhir yang valid, sehingga kasus re-entry tetap punya konteks risk/reward seperti signal valid.
 - Logic marker dibump ke `0x13C00370`.
 
+### v13.11.38 — SW trend override
+- Menambahkan opsi `InpSW_UseTrendOverride`, `InpSW_OverrideMinSlowAngleDeg`, `InpSW_OverrideMinADX`, `InpSW_OverrideRequireDIDirection`, dan `InpSW_OverrideRequireMARibbonDirection` di group `SW / Sideway Clustering Filter`.
+- Saat SW terdeteksi `CHOP`, BUY/SELL bisa override menjadi `TREND_OVR <score>` bila angle slow MA, arah MA ribbon, ADX, dan DI direction memenuhi syarat sesuai input.
+- `SWTriggered()` sekarang menerima arah signal sehingga live pipeline, historical pipeline, dashboard, dan block reason memakai evaluasi override yang sama.
+- Logic marker dibump ke `0x13C00380`.
+
 ---
 
 ## 3. Status EA aktif saat ini
@@ -172,10 +178,10 @@ File aktif: `Dachi_Trader_v13_11_37.mq5`
 
 Identifier yang harus sinkron:
 - Header file: `Dachi_Trader_v13_11_37.mq5`
-- Version: `13.11.37`
-- License payload: `"ea_version":"13.11.37"`
-- Init/deinit log: `v13.11.37`
-- Logic marker: `0x13C00370`
+- Version: `13.11.38`
+- License payload: `"ea_version":"13.11.38"`
+- Init/deinit log: `v13.11.38`
+- Logic marker: `0x13C00380`
 
 ---
 
