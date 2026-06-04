@@ -1,8 +1,8 @@
 # Arsip Sesi & Handoff Gabungan — Dachi Trader EA
 
-Tanggal update terakhir: 2026-06-02
+Tanggal update terakhir: 2026-06-04
 Branch kerja: `work`
-EA aktif saat ini: `Dachi_Trader_v13_11_37.mq5`
+EA aktif saat ini: `Dachi_Trader_v13_11_38.mq5`
 Dokumen ini menggabungkan handoff baseline (`HANDOFF_DACHI_TRADER_V13_11_7_ID.md`) dengan perjalanan sesi Clean Core / Advanced Modules. **Setiap update berikutnya wajib memperbarui dokumen ini.**
 
 ---
@@ -30,7 +30,7 @@ Sumber: `HANDOFF_DACHI_TRADER_V13_11_7_ID.md`.
 
 ---
 
-## 2. Perjalanan sesi Clean Core sampai v13.11.37
+## 2. Perjalanan sesi Clean Core sampai v13.11.38
 
 ### v13.11.8 — HTF Context + Clean Core awal
 - Menambahkan HTF context gate H1/M15.
@@ -164,18 +164,31 @@ Sumber: `HANDOFF_DACHI_TRADER_V13_11_7_ID.md`.
 - Historical BRE sekarang mempertahankan visual ENTRY/SL/TP untuk re-entry terakhir yang valid, sehingga kasus re-entry tetap punya konteks risk/reward seperti signal valid.
 - Logic marker dibump ke `0x13C00370`.
 
+### v13.11.38 — BRE V-Line alignment Opsi B
+- Mengoreksi SOP: pembaruan logic setelah v13.11.37 tidak boleh tetap memakai file/hash v13.11.37; rilis ini membump file aktif ke v13.11.38 dan logic marker ke `0x13C00380`.
+- Mengimplementasikan **Opsi B**: V-Line dapat dipakai sebagai acuan/bias BRE tanpa harus menjadi hard entry guard.
+- Mengonsolidasikan SW Trend Override secara resmi di rilis ini: SW CHOP/LIMITED dapat dibypass jika MA alignment, slow MA angle, ADX, dan DI direction mengonfirmasi trend searah signal.
+- Input baru `InpSW_UseTrendOverride`, `InpSW_OverrideMinSlowAngleDeg`, `InpSW_OverrideMinADX`, `InpSW_OverrideRequireDIDirection`, dan `InpSW_OverrideRequireMAAlign` mengatur override SW.
+- Input baru `InpBRE_UseVLineAlignment` membuat BRE membaca arah V-Line sebelum fire: jika V-Line bearish maka BRE BUY ditahan; jika V-Line bullish maka BRE SELL ditahan.
+- Input baru `InpBRE_BlockNeutralVLine` menentukan apakah V-Line neutral/no-data boleh atau tidak untuk BRE; default true agar re-entry lebih aman.
+- Menambahkan helper `GetVLineDirectionAt()` agar arah V-Line bisa dihitung terpisah dari `InpUseVLineGuard`; `InpUseVLineGuard=false` kini hanya mematikan hard block V-Line, bukan kemampuan BRE memakai V-Line sebagai kompas.
+- Dashboard menampilkan row `BRE V-Line` untuk audit alignment BRE.
+- Historical BRE memakai V-Line alignment yang sama sehingga label `RE-ENTRY BUY/SELL` di ScanHistory parity dengan live.
+- Catatan: user menyebut dua pembaruan sebelumnya sempat tetap berada di v13.11.37; rilis ini menjadi koreksi versioning/handoff resmi.
+- Logic marker dibump ke `0x13C00380`.
+
 ---
 
 ## 3. Status EA aktif saat ini
 
-File aktif: `Dachi_Trader_v13_11_37.mq5`
+File aktif: `Dachi_Trader_v13_11_38.mq5`
 
 Identifier yang harus sinkron:
-- Header file: `Dachi_Trader_v13_11_37.mq5`
-- Version: `13.11.37`
-- License payload: `"ea_version":"13.11.37"`
-- Init/deinit log: `v13.11.37`
-- Logic marker: `0x13C00370`
+- Header file: `Dachi_Trader_v13_11_38.mq5`
+- Version: `13.11.38`
+- License payload: `"ea_version":"13.11.38"`
+- Init/deinit log: `v13.11.38`
+- Logic marker: `0x13C00380`
 
 ---
 
@@ -189,6 +202,7 @@ Identifier yang harus sinkron:
    - V-Line bukan HTF gate.
    - Default timeframe `PERIOD_CURRENT` agar match chart aktif.
    - Visual V-Line harus stabil, tidak flicker.
+   - Mulai v13.11.38, V-Line juga dapat menjadi acuan BRE secara independen dari hard guard: `InpUseVLineGuard=false` boleh, tetapi `InpBRE_UseVLineAlignment=true` tetap membuat BRE mengikuti bias V-Line.
 
 3. **Slow MA Angle Guard sebagai filter visual**
    - Dibaca dari sudut visual chart.
@@ -211,13 +225,14 @@ Identifier yang harus sinkron:
 
 Karena environment Codex tidak memiliki compiler MQL5, test runtime wajib di MetaEditor/MT5:
 
-1. Compile `Dachi_Trader_v13_11_37.mq5`.
+1. Compile `Dachi_Trader_v13_11_38.mq5`.
 2. Attach ke XAUUSD M5.
 3. Test Blocked Retest Re-entry:
    - Buat kondisi sinyal hard-blocked, lalu tunggu pullback/retest ke MA band.
    - BUY re-entry hanya boleh fire jika ADX >= `InpBRE_MinADX`, ADX rising bila `InpBRE_RequireADXRising=true`, dan `DI+ > DI- + InpBRE_DIMargin`; SELL jika `DI- > DI+ + InpBRE_DIMargin`.
-   - Dashboard `Blocked ReEntry` harus menampilkan direction, countdown bars, dan reason saat armed.
-   - History scan harus menampilkan label krem `RE-ENTRY BUY/SELL` pada retest yang valid dan hanya untuk alasan block yang toggle-nya ON.
+   - Jika `InpBRE_UseVLineAlignment=true`, BUY BRE harus ditahan saat V-Line bearish dan SELL BRE harus ditahan saat V-Line bullish, meskipun `InpUseVLineGuard=false`.
+   - Dashboard `Blocked ReEntry` harus menampilkan direction, countdown bars, dan reason saat armed; dashboard `BRE V-Line` harus menunjukkan bias yang dipakai BRE.
+   - History scan harus menampilkan label krem `RE-ENTRY BUY/SELL` pada retest yang valid dan hanya untuk alasan block yang toggle-nya ON serta lolos V-Line alignment.
 4. Test remove cleanup:
    - Attach EA, aktifkan visual V-Line/MA/TP-SL/dashboard, lalu remove EA.
    - Semua object prefix `DT13`/`DT13_` harus hilang dari chart.
@@ -230,9 +245,9 @@ Karena environment Codex tidak memiliki compiler MQL5, test runtime wajib di Met
    - Matikan filter/gate, reload EA, lalu pastikan label lama `! BLOCKED` berubah menjadi BUY/SELL/LIMITED sesuai evaluasi terbaru.
    - Jika `InpShowBlockedSignals=false`, object `SIG_B_*/SIG_S_*` blocked lama harus hilang.
 7. Test SW / Sideway Clustering:
-   - `InpSW_Action=F_SOFT` harus menampilkan `LIMITED` saat `SW / Sideway Clustering` masuk `CHOP`, tanpa hard-block.
+   - `InpSW_Action=F_SOFT` harus menampilkan `LIMITED` saat `SW / Sideway Clustering` masuk `CHOP`, tanpa hard-block, kecuali `InpSW_UseTrendOverride=true` dan trend evidence valid.
    - `InpSW_Action=F_HARD` harus memblok sinyal saat skor SW >= `InpSW_ChopThreshold`.
-   - Dashboard row `SW / Sideway Clustering` harus berubah antara `ORDER`, `MIXED`, `TREND`, dan `CHOP`.
+   - Dashboard row `SW / Sideway Clustering` harus berubah antara `ORDER`, `MIXED`, `TREND`, `CHOP`, dan `TREND_OVR`.
 8. Test V-Line:
    - `InpVLine_TF=PERIOD_CURRENT` untuk match chart M5.
    - Band tidak flicker saat scroll/chart update.

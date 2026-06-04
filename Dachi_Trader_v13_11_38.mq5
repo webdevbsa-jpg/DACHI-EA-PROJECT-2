@@ -1,10 +1,10 @@
-// Dachi_Trader_v13_11_37.mq5 — Expert Advisor
-// Version: 13.11.37
+// Dachi_Trader_v13_11_38.mq5 — Expert Advisor
+// Version: 13.11.38
 // Clean Core branch: simplified runtime pipeline (F2 + HTF gate).
 
 #property copyright   "Daniel @danieljulyanto"
-#property version     "13.11.37"
-#property description "Dachi Trader v13.11.37 — Expert Advisor"
+#property version     "13.11.38"
+#property description "Dachi Trader v13.11.38 — Expert Advisor"
 
 #define MAX_TP            30
 #define VOL_AVG_PERIOD    20
@@ -27,7 +27,7 @@
 #define DB_CLR_CYAN       C'0,200,200'
 #define DB_CLR_ORANGE     C'255,165,0'
 #define DB_CLR_MAGENTA    C'255,0,255'    // v13.9.3: BLOCKED label color
-#define DB_CLR_CREAM      C'245,222,179'  // v13.11.37: RE-ENTRY label color
+#define DB_CLR_CREAM      C'245,222,179'  // v13.11.38: RE-ENTRY label color
 #define DB_CLR_BG_GREEN   C'0,120,0'
 #define DB_CLR_BG_RED     C'160,0,0'
 #define DB_CLR_BG_BLACK   C'25,25,25'
@@ -75,6 +75,11 @@ input double             InpSW_ChopThreshold  = 0.82;   // high entropy needed b
 input double             InpSW_MixedThreshold = 0.62;   // dashboard MIXED/ORDERED boundary
 input double             InpSW_DirectionalBalanceMax = 0.22; // CHOP only if bull/bear balance is this low
 input double             InpSW_BodyDominanceMax      = 0.38; // CHOP only if strong body share is this low
+input bool               InpSW_UseTrendOverride      = true; // allow strong trend evidence to bypass SW CHOP/LIMITED
+input double             InpSW_OverrideMinSlowAngleDeg = 5.0; // BUY needs +angle, SELL needs -angle to override SW
+input double             InpSW_OverrideMinADX        = 18.0; // minimum ADX for SW trend override
+input bool               InpSW_OverrideRequireDIDirection = true; // BUY DI+>DI-, SELL DI->DI+
+input bool               InpSW_OverrideRequireMAAlign = true; // BUY fast>slow, SELL fast<slow
 
 input group "=== Clean Core HTF Context (H1 Bias + M15 Setup) ==="
 input bool   InpUseH1Bias         = true;
@@ -285,6 +290,8 @@ input double InpBRE_MinADX                = 18.0;   // minimum ADX strength befo
 input bool   InpBRE_RequireADXRising      = true;   // avoid sideway: ADX must be rising vs older bar
 input int    InpBRE_ADXRiseBars           = 2;      // compare current ADX against this many bars back
 input bool   InpBRE_RequireSignalCandle   = true;   // confirmation candle must close in re-entry direction
+input bool   InpBRE_UseVLineAlignment     = true;   // Opsi B: use V-Line as BRE direction veto even if V-Line hard guard is OFF
+input bool   InpBRE_BlockNeutralVLine     = true;   // if V-Line bias is neutral/no-data, do not fire BRE
 input bool   InpBRE_AllowF2Blocks         = true;   // allow re-entry if original block reason was F2
 input bool   InpBRE_AllowHTFBlocks        = true;   // allow re-entry if original block reason was HTF
 input bool   InpBRE_AllowVLineBlocks      = true;   // allow re-entry if original block reason was V-Line
@@ -686,7 +693,7 @@ bool LIC_VerifyOnce(){
     }
     string url = InpLicense_URL + "/backend/api/license/verify.php";
     long account = AccountInfoInteger(ACCOUNT_LOGIN);
-    string body = StringFormat("{\"account_number\":\"%I64u\",\"ea_version\":\"13.11.37\"}", (ulong)account);
+    string body = StringFormat("{\"account_number\":\"%I64u\",\"ea_version\":\"13.11.38\"}", (ulong)account);
     char post[]; StringToCharArray(body, post, 0, StringLen(body));
     char result[]; string headers="Content-Type: application/json\r\n"; string resp_headers;
     int timeout = 5000;
@@ -809,7 +816,7 @@ int CleanupObjectsByPrefixAndType(string prefix, int object_type){
 }
 
 int CleanupAllEAObjects(){
-    // v13.11.37: delete EA objects by prefix + object type on the main chart.
+    // v13.11.38: delete EA objects by prefix + object type on the main chart.
     // This is less aggressive than one all-window/all-type purge and avoids
     // thousands of queued ObjectDelete() calls, reducing remove-time abnormal
     // termination risk when historical MA/V-Line/label visuals are heavy.
@@ -1129,7 +1136,7 @@ int OnInit(){
     ArrayInitialize(g_visual_tp,0);ArrayInitialize(g_visual_tp_hit,false);
     ResetSmartTPState();
 
-    // v13.11.37 — startup self-clean catches remnants from a prior abnormal
+    // v13.11.38 — startup self-clean catches remnants from a prior abnormal
     // termination before the EA draws fresh objects again.
     int startup_deleted=CleanupAllEAObjects();
     if(startup_deleted>0) Print("[INIT-CLEANUP] stale EA objects deleted=",startup_deleted);
@@ -1172,7 +1179,7 @@ int OnInit(){
     if(h_ema_fast==INVALID_HANDLE||h_sma_slow==INVALID_HANDLE||h_atr==INVALID_HANDLE){Print("[ERROR] Core handle fail");return INIT_FAILED;}
 
     // ADX handle — shared by F1 (DI±) and Market Regime detector.
-    if(InpF1_Action!=F_OFF || InpRegime_Enable){
+    if(InpF1_Action!=F_OFF || InpRegime_Enable || InpUseBlockedRetestReentry || InpSW_UseTrendOverride){
         h_adx=iADX(_Symbol,_Period,14);
         if(h_adx==INVALID_HANDLE){Print("[ERROR] ADX handle fail");return INIT_FAILED;}
     }
@@ -1222,7 +1229,7 @@ int OnInit(){
     ChartSetInteger(0,CHART_SHOW_GRID,false);ChartSetInteger(0,CHART_MODE,CHART_CANDLES);
 
     Print("==============================================================");
-    Print("[INIT] Dachi Trader v13.11.37 | ",_Symbol," ",EnumToString(_Period),
+    Print("[INIT] Dachi Trader v13.11.38 | ",_Symbol," ",EnumToString(_Period),
           " | Mode=",(InpIndicatorOnly?"INDICATOR":"EA ACTIVE"));
     string slmm=(InpSlowMA_Method==MODE_EMA?"EMA":InpSlowMA_Method==MODE_SMMA?"SMMA":InpSlowMA_Method==MODE_LWMA?"LWMA":"SMA");
     Print("[INIT] Core: EMA",InpEMA_Fast,"/",slmm,InpSMA_Slow," | ATR",InpATR_Period);
@@ -1260,7 +1267,7 @@ int OnInit(){
 void OnDeinit(const int reason){
     EventKillTimer();
     int deleted=CleanupAllEAObjects();
-    Print("[DEINIT] Dachi v13.11.37 removed reason=",reason," cleanup_deleted=",deleted);
+    Print("[DEINIT] Dachi v13.11.38 removed reason=",reason," cleanup_deleted=",deleted);
     if(h_ema_fast!=INVALID_HANDLE)IndicatorRelease(h_ema_fast);
     if(h_sma_slow!=INVALID_HANDLE)IndicatorRelease(h_sma_slow);
     if(h_atr!=INVALID_HANDLE)IndicatorRelease(h_atr);
@@ -1359,6 +1366,11 @@ uint ComputeFilterHash(){
     h = (h ^ (uint)(int)(InpSW_MixedThreshold*100)) * 16777619;
     h = (h ^ (uint)(int)(InpSW_DirectionalBalanceMax*100)) * 16777619;
     h = (h ^ (uint)(int)(InpSW_BodyDominanceMax*100)) * 16777619;
+    h = (h ^ (uint)(InpSW_UseTrendOverride?1:0)) * 16777619;
+    h = (h ^ (uint)(int)(InpSW_OverrideMinSlowAngleDeg*100)) * 16777619;
+    h = (h ^ (uint)(int)(InpSW_OverrideMinADX*100)) * 16777619;
+    h = (h ^ (uint)(InpSW_OverrideRequireDIDirection?1:0)) * 16777619;
+    h = (h ^ (uint)(InpSW_OverrideRequireMAAlign?1:0)) * 16777619;
     h = (h ^ (uint)(InpUseBlockedRetestReentry?1:0)) * 16777619;
     h = (h ^ (uint)InpBRE_Bars) * 16777619;
     h = (h ^ (uint)(int)(InpBRE_RetestBufferATR*100)) * 16777619;
@@ -1369,6 +1381,8 @@ uint ComputeFilterHash(){
     h = (h ^ (uint)(InpBRE_RequireADXRising?1:0)) * 16777619;
     h = (h ^ (uint)InpBRE_ADXRiseBars) * 16777619;
     h = (h ^ (uint)(InpBRE_RequireSignalCandle?1:0)) * 16777619;
+    h = (h ^ (uint)(InpBRE_UseVLineAlignment?1:0)) * 16777619;
+    h = (h ^ (uint)(InpBRE_BlockNeutralVLine?1:0)) * 16777619;
     h = (h ^ (uint)(InpBRE_AllowF2Blocks?1:0)) * 16777619;
     h = (h ^ (uint)(InpBRE_AllowHTFBlocks?1:0)) * 16777619;
     h = (h ^ (uint)(InpBRE_AllowVLineBlocks?1:0)) * 16777619;
@@ -1424,7 +1438,7 @@ uint ComputeFilterHash(){
     h = (h ^ (uint)(int)(InpSQ_SellCloseLocMax*100)) * 16777619;
     h = (h ^ (uint)(int)(InpSQ_SpikeRatioBlock*100)) * 16777619;
 
-    h = (h ^ (uint)0x13C00370)             * 16777619;   // logic version marker
+    h = (h ^ (uint)0x13C00380)             * 16777619;   // logic version marker
     return h;
 }
 
@@ -1900,22 +1914,28 @@ bool CalcEvasiveSupertrendAt(ENUM_TIMEFRAMES tf, int idx, double &out_band, int 
     return true;
 }
 
-bool EvasiveSTBlocks(int sig, int idx){
-    g_est_dir=0; g_est_band=0.0; g_est_noisy=false; g_est_state=InpUseVLineGuard?"ERR":"OFF";
-    if(!InpUseVLineGuard) return false;
+bool GetVLineDirectionAt(int idx, int &out_dir, string &out_state, double &out_band, bool &out_noisy){
+    out_dir=0; out_state="NO_DATA"; out_band=0.0; out_noisy=false;
     ENUM_TIMEFRAMES tf=(InpVLine_TF==PERIOD_CURRENT?_Period:InpVLine_TF);
     int tf_shift=idx;
     if(tf!=_Period){
         datetime t=iTime(_Symbol,_Period,idx);
         tf_shift=iBarShift(_Symbol,tf,t,false);
-        if(tf_shift<0){ g_est_state="NO_BAR"; return InpVLine_BlockNeutral; }
+        if(tf_shift<0){ out_state="NO_BAR"; return false; }
     }
     bool changed=false;
-    if(!CalcEvasiveSupertrendAt(tf,tf_shift,g_est_band,g_est_dir,g_est_noisy,changed)){
-        g_est_state="NO_DATA";
-        return InpVLine_BlockNeutral;
+    if(!CalcEvasiveSupertrendAt(tf,tf_shift,out_band,out_dir,out_noisy,changed)){
+        out_state="NO_DATA";
+        return false;
     }
-    g_est_state=(g_est_dir>0?"BULL":"BEAR")+(g_est_noisy?" NOISE":"");
+    out_state=(out_dir>0?"BULL":"BEAR")+(out_noisy?" NOISE":"");
+    return (out_dir!=0);
+}
+
+bool EvasiveSTBlocks(int sig, int idx){
+    g_est_dir=0; g_est_band=0.0; g_est_noisy=false; g_est_state=InpUseVLineGuard?"ERR":"OFF";
+    if(!InpUseVLineGuard) return false;
+    if(!GetVLineDirectionAt(idx,g_est_dir,g_est_state,g_est_band,g_est_noisy)) return InpVLine_BlockNeutral;
     return (sig!=g_est_dir);
 }
 
@@ -2057,6 +2077,43 @@ bool SWTriggered(int idx){
     if(!CalcSWAt(idx,g_sw_score,g_sw_state)) return false;
     g_sw_trig=(StringFind(g_sw_state,"CHOP") == 0);
     return g_sw_trig;
+}
+
+bool SWTrendOverrideOk(int sig, int idx){
+    if(!InpSW_UseTrendOverride || sig==0) return false;
+
+    if(InpSW_OverrideRequireMAAlign){
+        double ef[1], sm[1];
+        if(CopyBuffer(h_ema_fast,0,idx,1,ef)<=0 || CopyBuffer(h_sma_slow,0,idx,1,sm)<=0) return false;
+        if(sig==1 && ef[0]<=sm[0]) return false;
+        if(sig==-1 && ef[0]>=sm[0]) return false;
+    }
+
+    double angle=0.0;
+    if(!CalcSlowMAVisualAngleAt(idx,angle)) return false;
+    double angle_th=MathMax(0.0,InpSW_OverrideMinSlowAngleDeg);
+    if(sig==1 && angle<angle_th) return false;
+    if(sig==-1 && angle>-angle_th) return false;
+
+    if(h_adx==INVALID_HANDLE) return false;
+    double adx[1], dp[1], dm[1];
+    if(CopyBuffer(h_adx,0,idx,1,adx)<=0 || CopyBuffer(h_adx,1,idx,1,dp)<=0 || CopyBuffer(h_adx,2,idx,1,dm)<=0) return false;
+    if(adx[0] < InpSW_OverrideMinADX) return false;
+    if(InpSW_OverrideRequireDIDirection){
+        if(sig==1 && dp[0]<=dm[0]) return false;
+        if(sig==-1 && dm[0]<=dp[0]) return false;
+    }
+    return true;
+}
+
+bool SWTriggeredForSignal(int sig, int idx){
+    bool trig=SWTriggered(idx);
+    if(trig && SWTrendOverrideOk(sig,idx)){
+        g_sw_trig=false;
+        g_sw_state="TREND_OVR "+DoubleToString(g_sw_score,2);
+        return false;
+    }
+    return trig;
 }
 
 bool SidewayBlocks(int sig, int idx){
@@ -2248,7 +2305,7 @@ bool EvaluatePipeline(int sig){
     bool h_htf = HTFContextBlocks(sig, 1);
     bool h_est = EvasiveSTBlocks(sig, 1);
     bool h_slow_angle = SlowMAAngleBlocks(sig, 1);
-    bool t_sw = SWTriggered(1);
+    bool t_sw = SWTriggeredForSignal(sig,1);
     bool h_sw = (InpSW_Action==F_HARD && t_sw);
     bool s_sw = (InpSW_Action==F_SOFT && t_sw);
     bool h_sideway = SidewayBlocks(sig, 1);
@@ -2274,7 +2331,7 @@ bool EvaluatePipelineAt(int idx, int sig, bool &out_hard, bool &out_soft){
     if(HTFContextBlocks(sig, idx)) out_hard=true;
     if(EvasiveSTBlocks(sig, idx)) out_hard=true;
     if(SlowMAAngleBlocks(sig, idx)) out_hard=true;
-    bool t_sw=SWTriggered(idx);
+    bool t_sw=SWTriggeredForSignal(sig,idx);
     if(t_sw && InpSW_Action==F_HARD) out_hard=true;
     if(t_sw && InpSW_Action==F_SOFT) out_soft=true;
     if(SidewayBlocks(sig, idx)) out_hard=true;
@@ -2817,7 +2874,7 @@ string GetBlockReasonAt(int sig, int idx){
     if(HTFContextBlocks(sig,idx)) return "HTF";
     if(EvasiveSTBlocks(sig,idx)) return "V_LINE";
     if(SlowMAAngleBlocks(sig,idx)) return "SLOW_ANGLE";
-    if(SWTriggered(idx) && InpSW_Action==F_HARD) return "SW";
+    if(SWTriggeredForSignal(sig,idx) && InpSW_Action==F_HARD) return "SW";
     if(SidewayBlocks(sig,idx)) return "SIDEWAY";
     string atr_state=""; if(EvalATRHealthAt(idx,atr_state)==DEC_BLOCKED) return "ATR_HEALTH";
     string sq_state="", sq_reason=""; if(EvalSqueezeGuard(sig,idx,sq_state,sq_reason)==DEC_BLOCKED) return "SQUEEZE";
@@ -2838,6 +2895,16 @@ bool BREDIOk(int dir, int idx){
     if(!InpBRE_RequireDIDirection) return true;
     if(dir==1) return (dp[0] > dm[0] + InpBRE_DIMargin);
     return (dm[0] > dp[0] + InpBRE_DIMargin);
+}
+
+bool BREVLineAlignOk(int dir, int idx, string &state){
+    state="OFF";
+    if(!InpBRE_UseVLineAlignment) return true;
+    int vdir=0; double band=0.0; bool noisy=false;
+    if(!GetVLineDirectionAt(idx,vdir,state,band,noisy) || vdir==0) return !InpBRE_BlockNeutralVLine;
+    if(dir==1) return (vdir>0);
+    if(dir==-1) return (vdir<0);
+    return false;
 }
 
 void ArmBlockedRetestReentry(int dir, datetime t, string reason){
@@ -2900,8 +2967,11 @@ void ProcessBlockedRetestReentry(){
     bool close_back=(g_bre_dir==1 ? c>top : c<bot);
     bool signal_candle_ok=!InpBRE_RequireSignalCandle || (g_bre_dir==1 ? c>o : c<o);
     bool di_ok=BREDIOk(g_bre_dir,idx);
+    string bre_vline_state="OFF";
+    bool vline_ok=BREVLineAlignOk(g_bre_dir,idx,bre_vline_state);
     if(InpBRE_RequireMAAlign && !ma_aligned) return;
     if(!close_back || !signal_candle_ok || !di_ok) return;
+    if(!vline_ok){ Print("[BRE-HOLD] V-Line alignment blocks ",(g_bre_dir==1?"BUY":"SELL")," state=",bre_vline_state); return; }
     if(!PreCheckMarketConditions()) return;
 
     FireBlockedRetestReentry(g_bre_dir,iTime(_Symbol,_Period,idx),c);
@@ -2935,8 +3005,10 @@ bool FindBlockedRetestReentryAt(int block_idx, int dir, string reason, datetime 
         bool close_back=(dir==1 ? c>top : c<bot);
         bool signal_candle_ok=!InpBRE_RequireSignalCandle || (dir==1 ? c>o : c<o);
         bool di_ok=BREDIOk(dir,b);
+        string bre_vline_state="OFF";
+        bool vline_ok=BREVLineAlignOk(dir,b,bre_vline_state);
         if(InpBRE_RequireMAAlign && !ma_aligned) continue;
-        if(!close_back || !signal_candle_ok || !di_ok) continue;
+        if(!close_back || !signal_candle_ok || !di_ok || !vline_ok) continue;
 
         rt=iTime(_Symbol,_Period,b);
         rp=c;
@@ -3203,7 +3275,7 @@ void DrawSignalLabel(int dir,datetime t,double price,ENUM_SIGNAL_CLASS sc){
     nm+=IntegerToString((long)t);
     if(ObjectFind(0,nm)>=0){
         string old_txt=ObjectGetString(0,nm,OBJPROP_TEXT);
-        // v13.11.37 — do not let stale BLOCKED labels survive a settings change.
+        // v13.11.38 — do not let stale BLOCKED labels survive a settings change.
         // When filters are disabled or a signal re-evaluates as VALID/LIMITED,
         // remove the old blocked object first so the current classification can
         // repaint the timestamp correctly during ScanHistory/live redraw.
@@ -3743,7 +3815,7 @@ void DrawDashboard(bool force){
     bool htf_block = HTFContextBlocks(dash_sig, 1);
     bool est_block = EvasiveSTBlocks(dash_sig,1);
     bool slow_angle_block = SlowMAAngleBlocks(dash_sig,1);
-    bool sw_trig = SWTriggered(1);
+    bool sw_trig = SWTriggeredForSignal(dash_sig,1);
     bool sw_block = (InpSW_Action==F_HARD && sw_trig);
     bool side_block = SidewayBlocks(dash_sig,1);
     string atr_state=""; ENUM_FILTER_DECISION atr_dec=EvalATRHealthAt(1,atr_state);
@@ -3770,6 +3842,9 @@ void DrawDashboard(bool force){
     DrawFilterRow("SW",row++,"SW / Sideway Clustering",InpSW_Action,sw_trig,g_sw_state,yb);
     string bre_val=InpUseBlockedRetestReentry?(g_bre_armed?((g_bre_dir==1?"BUY ":"SELL ")+IntegerToString(g_bre_counter)+"b "+g_bre_reason):"IDLE"):"OFF";
     DrawDR("BRE",row++,"Blocked ReEntry",bre_val,!InpUseBlockedRetestReentry?DB_CLR_GRAY:(g_bre_armed?DB_CLR_ORANGE:DB_CLR_GREEN),yb);
+    string bre_vline_state="OFF";
+    bool bre_vline_ok=BREVLineAlignOk(dash_sig,1,bre_vline_state);
+    DrawDR("BREVL",row++,"BRE V-Line", InpBRE_UseVLineAlignment?bre_vline_state:"OFF", !InpBRE_UseVLineAlignment?DB_CLR_GRAY:(bre_vline_ok?DB_CLR_GREEN:DB_CLR_RED), yb);
     DrawDR("ATRH",row++,"ATR Health", InpUseATRHealthGuard?atr_state:"OFF", !InpUseATRHealthGuard?DB_CLR_GRAY:(atr_dec==DEC_BLOCKED?DB_CLR_RED:(atr_dec==DEC_LIMITED?DB_CLR_YELLOW:DB_CLR_GREEN)), yb);
     DrawDR("SQ",row++,"Squeeze", SqueezeStateToString(g_sq_state)+" "+g_sq_reason, g_sq_state==SQ_ARMED||g_sq_state==SQ_FALSE_BREAK?DB_CLR_RED:(g_sq_state==SQ_BREAKOUT_UP||g_sq_state==SQ_BREAKOUT_DN?DB_CLR_YELLOW:DB_CLR_GRAY), yb);
 
