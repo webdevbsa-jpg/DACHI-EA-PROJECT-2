@@ -2,7 +2,7 @@
 
 Tanggal update terakhir: 2026-06-04
 Branch kerja: `work`
-EA aktif saat ini: `Dachi_Trader_v13_11_42.mq5`
+EA aktif saat ini: `Dachi_Trader_v13_11_43.mq5`
 Dokumen ini menggabungkan handoff baseline (`HANDOFF_DACHI_TRADER_V13_11_7_ID.md`) dengan perjalanan sesi Clean Core / Advanced Modules. **Setiap update berikutnya wajib memperbarui dokumen ini.**
 
 ---
@@ -30,7 +30,7 @@ Sumber: `HANDOFF_DACHI_TRADER_V13_11_7_ID.md`.
 
 ---
 
-## 2. Perjalanan sesi Clean Core sampai v13.11.42
+## 2. Perjalanan sesi Clean Core sampai v13.11.44
 
 ### v13.11.8 — HTF Context + Clean Core awal
 - Menambahkan HTF context gate H1/M15.
@@ -203,18 +203,31 @@ Sumber: `HANDOFF_DACHI_TRADER_V13_11_7_ID.md`.
 - Mengubah default `InpJournalUseCommonFolder=true` agar file hasil Strategy Tester lebih mudah ditemukan di `Terminal/Common/Files/Dachi_Trader_Logs`, bukan tersembunyi di sandbox tester agent.
 - Menambahkan log `[JOURNAL] ready path=... common=YES/NO` agar lokasi file dapat dilihat langsung di tab Experts/Journal.
 
+### v13.11.43 — Journal per sesi backtest + path hint
+- Membump file aktif ke `Dachi_Trader_v13_11_43.mq5` dan logic marker ke `0x13C00430`.
+- Mengubah nama file journal menjadi per **1x sesi backtest**, memakai session id yang dibuat saat `OnInit()` dari symbol, timeframe, waktu lokal, dan tick counter; file tidak lagi berubah per tanggal market/simulated `TimeCurrent()`.
+- Menambahkan `JournalRootHint()` dan memperluas log `[JOURNAL] ready path=... root=... common=... session=...` agar user tahu lokasi root sebenarnya.
+- Catatan: jika `InpJournalUseCommonFolder=false` di Strategy Tester, file bisa ditulis ke sandbox tester/agent, bukan folder `MQL5/Files` terminal utama; karena itu default tetap `true` untuk `Common/Files`.
+
+### v13.11.44 — Position Exit fields untuk Auto Journal
+- Membump file aktif ke `Dachi_Trader_v13_11_44.mq5` dan logic marker ke `0x13C00440`.
+- Menambahkan kolom journal `position_exit_time`, `position_exit_price`, `position_move_pts`, `position_duration_bars`, `position_result`, dan `position_exit_reason`.
+- `signal_exit_price` tetap berarti harga signal/crossing berikutnya, sedangkan `position_exit_price` berarti harga posisi yang benar-benar keluar lebih awal/real exit.
+- Exit position ditandai dari `EAClose()` dan `DrawExitMarker()` sehingga prematur exit seperti `SL`, `ADAPT`, `FMA-X`, `MAXBAR`, `SPIKE`, `REV`, manual/progressive/smart exit, dan indicator-only exit marker dapat tercatat sebelum row journal ditutup.
+- Kolom position exit hanya terisi untuk signal yang memang memiliki posisi/exit yang terdeteksi; `BLOCKED` tanpa entry tetap tercatat dengan kolom position exit kosong.
+
 ---
 
 ## 3. Status EA aktif saat ini
 
-File aktif: `Dachi_Trader_v13_11_42.mq5`
+File aktif: `Dachi_Trader_v13_11_44.mq5`
 
 Identifier yang harus sinkron:
-- Header file: `Dachi_Trader_v13_11_42.mq5`
-- Version: `13.11.42`
-- License payload: `"ea_version":"13.11.42"`
-- Init/deinit log: `v13.11.42`
-- Logic marker: `0x13C00420`
+- Header file: `Dachi_Trader_v13_11_44.mq5`
+- Version: `13.11.44`
+- License payload: `"ea_version":"13.11.44"`
+- Init/deinit log: `v13.11.44`
+- Logic marker: `0x13C00440`
 
 ---
 
@@ -251,7 +264,7 @@ Identifier yang harus sinkron:
 
 Karena environment Codex tidak memiliki compiler MQL5, test runtime wajib di MetaEditor/MT5:
 
-1. Compile `Dachi_Trader_v13_11_42.mq5`.
+1. Compile `Dachi_Trader_v13_11_44.mq5`.
 2. Attach ke XAUUSD M5.
 3. Test Blocked Retest Re-entry:
    - Buat kondisi sinyal hard-blocked, lalu tunggu pullback/retest ke MA band.
@@ -284,9 +297,10 @@ Karena environment Codex tidak memiliki compiler MQL5, test runtime wajib di Met
 
 10. Test Backtest Auto Journal:
    - Jalankan Strategy Tester dengan `InpUseAutoJournal=true`.
-   - Pastikan file `Dachi_Trader_Logs/Dachi_Signal_Journal_<symbol>_<tf>_<date>.csv` langsung terbentuk saat init. Default `InpJournalUseCommonFolder=true`, jadi cek `Terminal/Common/Files/Dachi_Trader_Logs` dan lihat log `[JOURNAL] ready path=...`.
+   - Pastikan file `Dachi_Trader_Logs/Dachi_Signal_Journal_<symbol>_<tf>_<session>.csv` langsung terbentuk saat init. Default `InpJournalUseCommonFolder=true`, jadi cek `Terminal/Common/Files/Dachi_Trader_Logs` dan lihat log `[JOURNAL] ready path=... root=... session=...`.
    - Pastikan row `BLOCKED` tetap tercatat walaupun tidak ada trade/deal.
    - Pastikan `signal_exit_price` satu row sama dengan `signal_entry_price` row signal berikutnya, dan row terakhir tertulis `OPEN` saat EA deinit/backtest selesai.
+   - Pastikan exit prematur sebelum crossing/signal berikutnya mengisi `position_exit_time`, `position_exit_price`, `position_move_pts`, `position_duration_bars`, `position_result`, dan `position_exit_reason`, sementara `signal_exit_price` tetap mengikuti signal berikutnya.
    - Uji `InpBRE_EnterAsLimited=true/false` untuk memastikan RE-ENTRY memakai TP/SL tight atau normal sesuai opsi.
 
 ---
