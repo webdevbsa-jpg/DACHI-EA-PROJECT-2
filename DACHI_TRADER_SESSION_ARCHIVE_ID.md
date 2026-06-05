@@ -2,7 +2,7 @@
 
 Tanggal update terakhir: 2026-06-04
 Branch kerja: `work`
-EA aktif saat ini: `Dachi_Trader_v13_11_41.mq5`
+EA aktif saat ini: `Dachi_Trader_v13_11_42.mq5`
 Dokumen ini menggabungkan handoff baseline (`HANDOFF_DACHI_TRADER_V13_11_7_ID.md`) dengan perjalanan sesi Clean Core / Advanced Modules. **Setiap update berikutnya wajib memperbarui dokumen ini.**
 
 ---
@@ -30,7 +30,7 @@ Sumber: `HANDOFF_DACHI_TRADER_V13_11_7_ID.md`.
 
 ---
 
-## 2. Perjalanan sesi Clean Core sampai v13.11.41
+## 2. Perjalanan sesi Clean Core sampai v13.11.42
 
 ### v13.11.8 — HTF Context + Clean Core awal
 - Menambahkan HTF context gate H1/M15.
@@ -197,18 +197,24 @@ Sumber: `HANDOFF_DACHI_TRADER_V13_11_7_ID.md`.
 - Journal sekarang memakai state V-Line dari snapshot bar yang sama (`vstate`), bukan state dashboard live.
 - Tidak mengubah behavior trading/BRE selain perbaikan compile journal snapshot.
 
+### v13.11.42 — Journal file dibuat saat init + Common Files default
+- Membump file aktif ke `Dachi_Trader_v13_11_42.mq5` dan logic marker ke `0x13C00420`.
+- Menambahkan `JournalEnsureFile()` sehingga CSV dan folder log dibuat langsung saat EA init/backtest start, tidak menunggu signal kedua atau deinit.
+- Mengubah default `InpJournalUseCommonFolder=true` agar file hasil Strategy Tester lebih mudah ditemukan di `Terminal/Common/Files/Dachi_Trader_Logs`, bukan tersembunyi di sandbox tester agent.
+- Menambahkan log `[JOURNAL] ready path=... common=YES/NO` agar lokasi file dapat dilihat langsung di tab Experts/Journal.
+
 ---
 
 ## 3. Status EA aktif saat ini
 
-File aktif: `Dachi_Trader_v13_11_41.mq5`
+File aktif: `Dachi_Trader_v13_11_42.mq5`
 
 Identifier yang harus sinkron:
-- Header file: `Dachi_Trader_v13_11_41.mq5`
-- Version: `13.11.41`
-- License payload: `"ea_version":"13.11.41"`
-- Init/deinit log: `v13.11.41`
-- Logic marker: `0x13C00410`
+- Header file: `Dachi_Trader_v13_11_42.mq5`
+- Version: `13.11.42`
+- License payload: `"ea_version":"13.11.42"`
+- Init/deinit log: `v13.11.42`
+- Logic marker: `0x13C00420`
 
 ---
 
@@ -245,7 +251,7 @@ Identifier yang harus sinkron:
 
 Karena environment Codex tidak memiliki compiler MQL5, test runtime wajib di MetaEditor/MT5:
 
-1. Compile `Dachi_Trader_v13_11_41.mq5`.
+1. Compile `Dachi_Trader_v13_11_42.mq5`.
 2. Attach ke XAUUSD M5.
 3. Test Blocked Retest Re-entry:
    - Buat kondisi sinyal hard-blocked, lalu tunggu pullback/retest ke MA band.
@@ -278,7 +284,7 @@ Karena environment Codex tidak memiliki compiler MQL5, test runtime wajib di Met
 
 10. Test Backtest Auto Journal:
    - Jalankan Strategy Tester dengan `InpUseAutoJournal=true`.
-   - Pastikan file `Dachi_Trader_Logs/Dachi_Signal_Journal_<symbol>_<tf>_<date>.csv` terbentuk di `MQL5/Files` atau `Common/Files` jika `InpJournalUseCommonFolder=true`.
+   - Pastikan file `Dachi_Trader_Logs/Dachi_Signal_Journal_<symbol>_<tf>_<date>.csv` langsung terbentuk saat init. Default `InpJournalUseCommonFolder=true`, jadi cek `Terminal/Common/Files/Dachi_Trader_Logs` dan lihat log `[JOURNAL] ready path=...`.
    - Pastikan row `BLOCKED` tetap tercatat walaupun tidak ada trade/deal.
    - Pastikan `signal_exit_price` satu row sama dengan `signal_entry_price` row signal berikutnya, dan row terakhir tertulis `OPEN` saat EA deinit/backtest selesai.
    - Uji `InpBRE_EnterAsLimited=true/false` untuk memastikan RE-ENTRY memakai TP/SL tight atau normal sesuai opsi.
