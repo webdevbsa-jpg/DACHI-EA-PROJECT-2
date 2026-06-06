@@ -375,3 +375,12 @@ Workflow:
 2. Copy the four `Dachi_Signal_Journal_*.csv` files into the repo root.
 3. Double-click `tools/run_dachi_journal_analysis_windows.bat`.
 4. Open `reports/dachi_journal_analysis_full.md` and send it back for deeper timeframe-by-timeframe strategy analysis.
+
+
+### v13.11.44 journal analyzer usability fix
+
+User hit PowerShell `CommandNotFoundException` because `M15=...csv` / `M30=...csv` were pasted as standalone PowerShell commands instead of Python arguments. Added:
+
+- `tools/run_dachi_journal_analysis_windows.ps1` for PowerShell users;
+- a more robust `tools/run_dachi_journal_analysis_windows.bat` that works when copied beside the CSV files and analyzer;
+- runbook troubleshooting with a correct one-line PowerShell command.

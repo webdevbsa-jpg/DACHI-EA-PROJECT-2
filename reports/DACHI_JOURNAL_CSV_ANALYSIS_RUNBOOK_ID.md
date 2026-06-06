@@ -17,6 +17,35 @@ GitHub metadata observed via browser:
 - M30: 369 lines, approximately 105 KB.
 
 
+
+## Common error: PowerShell says `M15=... is not recognized`
+
+This happens when a Bash/CMD-style multi-line command is pasted into **PowerShell**. PowerShell tries to run `M15=...csv` as a program. Use one of these safer methods instead:
+
+### Best method
+
+Run the helper instead of typing the long command:
+
+```text
+tools\run_dachi_journal_analysis_windows.ps1
+```
+
+If Windows blocks PowerShell scripts, right-click the `.ps1` file and choose **Run with PowerShell**, or use the BAT helper:
+
+```text
+tools\run_dachi_journal_analysis_windows.bat
+```
+
+### PowerShell one-line command
+
+If you want to run manually in PowerShell, use **one line** like this from the folder that contains the CSV files and `analyze_dachi_journal.py`:
+
+```powershell
+py -3 .\analyze_dachi_journal.py M1=.\Dachi_Signal_Journal_XAUUSD_M1_20260101_000000_801487109.csv M5=.\Dachi_Signal_Journal_XAUUSD_M5_20260101_000000_801512250.csv M15=.\Dachi_Signal_Journal_XAUUSD_M15_20260101_000000_801534187.csv M30=.\Dachi_Signal_Journal_XAUUSD_M30_20260101_000000_801945593.csv --out .\reports\dachi_journal_analysis_full.md
+```
+
+Do **not** type only `M15=...csv` or `M30=...csv` by itself; those are arguments to Python, not standalone PowerShell commands.
+
 ## Beginner step-by-step: Windows local run
 
 Use this path if you are new to Python/terminal.
@@ -49,10 +78,16 @@ DACHI-EA-PROJECT-2\
 
 ### Step 3A — Easiest method: double-click the BAT helper
 
-Double-click:
+Double-click the BAT helper:
 
 ```text
 tools\run_dachi_journal_analysis_windows.bat
+```
+
+Or right-click the PowerShell helper and choose **Run with PowerShell**:
+
+```text
+tools\run_dachi_journal_analysis_windows.ps1
 ```
 
 The script will create:
