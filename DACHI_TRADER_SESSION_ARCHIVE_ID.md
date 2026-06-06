@@ -314,3 +314,64 @@ Karena environment Codex tidak memiliki compiler MQL5, test runtime wajib di Met
 - Jika filter baru memblok sinyal, tampilkan state/reason di dashboard agar user bisa audit.
 - Untuk SW / Sideway Clustering, kalibrasi threshold di XAUUSD M5 dulu dengan default `F_SOFT`; gunakan `F_HARD` hanya setelah skor CHOP terbukti akurat. Untuk v13.11.32, CHOP harus memenuhi entropy tinggi + directional balance rendah + body dominance rendah.
 - Saat analisis V-Line lag, jangan langsung mengganti logic utama; pertimbangkan mode opsional early-flip agar karakter noise-avoidance tetap bisa dipertahankan.
+
+---
+
+## 7. v13.11.44 Journal Analysis Utility (CSV institutional review support)
+
+User provided four Auto Journal CSV URLs for XAUUSD raw baseline testing across M1, M5, M15, and M30 with all filters OFF except spread and all exit gates OFF. In this container, shell network access to GitHub/raw/CDN endpoints is blocked by proxy (`CONNECT tunnel failed: 403`), while the browser view confirms the CSV files exist on GitHub.
+
+A local stdlib-only analyzer was added:
+
+- `tools/analyze_dachi_journal.py`
+- `reports/DACHI_JOURNAL_CSV_ANALYSIS_RUNBOOK_ID.md`
+
+Observed GitHub metadata:
+
+- M1 journal: 4,371 lines, about 1.2 MB.
+- M5 journal: 2,063 lines, about 582 KB.
+- M15 journal: 689 lines, about 195 KB.
+- M30 journal: 369 lines, about 105 KB.
+
+Purpose of the analyzer:
+
+- compare signal-to-signal outcome vs actual position-exit outcome;
+- score each timeframe by signal win rate, net points, average move, and profit factor;
+- break down win/loss behavior by ADX, ATR, SlowMA angle, MA gap, DI alignment, V-Line alignment/state, and SW state;
+- list worst rows for institutional-style post-trade review;
+- support decision-making about which filters/rules should be re-enabled after raw baseline testing.
+
+Recommended usage once CSV files are locally available:
+
+```bash
+python3 tools/analyze_dachi_journal.py \
+  M1=Dachi_Signal_Journal_XAUUSD_M1_20260101_000000_801487109.csv \
+  M5=Dachi_Signal_Journal_XAUUSD_M5_20260101_000000_801512250.csv \
+  M15=Dachi_Signal_Journal_XAUUSD_M15_20260101_000000_801534187.csv \
+  M30=Dachi_Signal_Journal_XAUUSD_M30_20260101_000000_801945593.csv \
+  --out reports/dachi_journal_analysis_full.md
+```
+
+Interpretation rules for this raw baseline:
+
+- if low ADX bins are negative, test minimum ADX and ADX-rising confirmation;
+- if DI-opposed rows are negative, require DI alignment for entries/BRE;
+- if low SlowMA-angle bins are negative, enable SlowMA Angle Guard;
+- if tight MA-gap bins are negative, add a minimum MA-gap anti-chop rule;
+- if V-Line-opposed rows are negative, use V-Line as BRE veto even when hard V-Line guard remains OFF;
+- if SW `CHOP/MIXED` rows are negative while `TREND/TREND_OVR` rows are positive, re-enable SW as `F_SOFT` before testing `F_HARD`;
+- if `signal_result=WIN` but `position_result=LOSS`, actual exit/SL behavior is hurting good signals; if `signal_result=LOSS` but `position_result=WIN`, exit gates are protecting capital.
+
+
+### Beginner local execution note
+
+A Windows helper was added for beginner usage:
+
+- `tools/run_dachi_journal_analysis_windows.bat`
+
+Workflow:
+
+1. Install Python on Windows and verify `py -3 --version`.
+2. Copy the four `Dachi_Signal_Journal_*.csv` files into the repo root.
+3. Double-click `tools/run_dachi_journal_analysis_windows.bat`.
+4. Open `reports/dachi_journal_analysis_full.md` and send it back for deeper timeframe-by-timeframe strategy analysis.
