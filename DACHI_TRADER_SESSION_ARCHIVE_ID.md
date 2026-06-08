@@ -384,3 +384,26 @@ User hit PowerShell `CommandNotFoundException` because `M15=...csv` / `M30=...cs
 - `tools/run_dachi_journal_analysis_windows.ps1` for PowerShell users;
 - a more robust `tools/run_dachi_journal_analysis_windows.bat` that works when copied beside the CSV files and analyzer;
 - runbook troubleshooting with a correct one-line PowerShell command.
+
+---
+
+## 8. Dachi Trader M5 Rulebook Baseline
+
+A dedicated rulebook file was added:
+
+- `DACHI_TRADER_M5_RULEBOOK_ID.md`
+
+This document consolidates the M5 journal analysis, SL/TP sizing decision, entry workflow, exit workflow, BRE treatment, V-Line usage, SW/Sideway rules, ADX/DI rules, and next coding plan into one canonical operating rulebook for the EA.
+
+Key decisions recorded there:
+
+- M5 is the primary execution timeframe.
+- M15 is the setup/context timeframe.
+- M30 is the directional/bias timeframe.
+- M1 is not used as a primary entry generator.
+- Default M5 active SL is 900 points.
+- Default M5 TP ladder is 900 / 1800 / 2700 / 3600 / 5000 points.
+- V-Line is not a universal hard entry blocker for M5; it is preferred as visual/context and BRE veto.
+- SW / Sideway Clustering starts as `F_SOFT`, not hard-block by default.
+- ADX should be handled as a band-pass filter, not a minimum-only filter.
+- SlowMA Angle must be timeframe-aware; M5 should not use a strict 3–5 degree hard requirement by default.
