@@ -407,3 +407,20 @@ Key decisions recorded there:
 - SW / Sideway Clustering starts as `F_SOFT`, not hard-block by default.
 - ADX should be handled as a band-pass filter, not a minimum-only filter.
 - SlowMA Angle must be timeframe-aware; M5 should not use a strict 3–5 degree hard requirement by default.
+
+---
+
+## 9. Dachi Trader M5 Implementation Plan
+
+A separate implementation-plan document was added:
+
+- `DACHI_TRADER_M5_IMPLEMENTATION_PLAN_ID.md`
+
+Purpose:
+
+- separate engineering plan from the trading rulebook;
+- define implementation phases for v13.11.45+;
+- list acceptance criteria for Risk Profile Preset, ADX Band Guard, V-Line Noise Guard, SW finalization, and analyzer upgrade;
+- define entry workflow, BRE workflow, exit workflow, testing workflow, and success criteria.
+
+This file should be used before coding the next EA release so every feature is implemented and tested in a measurable order instead of mixing multiple strategy changes at once.
